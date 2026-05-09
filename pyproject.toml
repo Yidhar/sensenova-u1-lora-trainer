@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "train_u1"
+version = "0.1.0"
+description = "Low-VRAM LoRA / partial-finetune trainer for SenseNova-U1-8B-MoT"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "train_u1 contributors" }]
+keywords = [
+  "sensenova",
+  "u1",
+  "lora",
+  "diffusion",
+  "flow-matching",
+  "multimodal",
+  "low-vram",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "torch>=2.9",
+  "transformers>=5.6",
+  "safetensors>=0.7",
+  "huggingface_hub>=0.26",
+  "sentencepiece",
+  "einops",
+  "pillow",
+  "numpy",
+  "bitsandbytes>=0.45",
+  "peft>=0.13",
+  "pyyaml",
+  "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.6"]
+eval = ["clip-by-openai"]
+
+[project.urls]
+Issues = "https://github.com/OpenSenseNova/SenseNova-U1/issues"
+Upstream = "https://github.com/OpenSenseNova/SenseNova-U1"
+ModelCard = "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT"
+
+[tool.setuptools.packages.find]
+include = ["train_u1*"]
+exclude = ["artifacts*", "dataset*", "hf_cache*", "u1_src*", "tests*"]
+
+[tool.setuptools.package-data]
+train_u1 = ["upstream_pinned_sha256.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["train_u1/tests"]
+addopts = "-q"

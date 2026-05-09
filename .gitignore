@@ -1,0 +1,52 @@
+# ---- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ---- Virtual env -----------------------------------------------------------
+.venv/
+venv/
+env/
+
+# ---- Editor / OS -----------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
+
+# ---- Claude Code session state --------------------------------------------
+.claude/
+
+# ---- Local-only: model weights, datasets, caches --------------------------
+hf_cache/
+dataset/
+*.safetensors
+*.pt
+*.bin
+*.gguf
+*.ckpt
+
+# ---- Local-only: experiment artifacts & runner scripts --------------------
+# All trained checkpoints, sweep PNGs, training logs, diagnostics live here.
+# Kept on disk for the maintainer; never published.
+artifacts/
+
+# ---- Upstream source mirror (cloned separately, see docs/SETUP.md) --------
+# We pin the upstream commit via train_u1.constants.CODE_COMMIT and inject the
+# 9 modeling .py files into the HF snapshot through
+# train_u1/scripts/install_modeling_into_snapshot.py. The full upstream tree
+# itself is not part of this repo.
+u1_src/
+
+# ---- Internal research notes (not part of the published trainer) ----------
+SenseNova_U1_8B_MoT_结构反推与低显存训练研究报告_*.md

@@ -1,0 +1,41 @@
+# Reference recipe: v16c (best LoRA + partial-finetune surface for 56-image
+# style transfer). Reproduces the maintainer's production checkpoint.
+#
+# Trainable surface = 286 M params total:
+#   - LoRA on attn (168 wraps) + LoRA on mlp (126 wraps), each r=64 a=64
+#   - Full-finetune on ts/ns embedders, vision_model_mot_gen, fm_head
+
+run_name: v16c
+
+data:
+  data_dir: dataset/Hayateluc
+  cap_max_pixels: 4194304
+  snap_bucket: true
+
+style:
+  trigger: "hayateluc style"
+  prompt_template: official
+
+lora:
+  spec: "attn=r64a64;mlp=r64a64"     # NB: not the 'default' preset — fm_head is full-FT here
+  dropout: 0.0
+
+unfreeze:
+  - '^fm_modules\.timestep_embedder\.'
+  - '^fm_modules\.noise_scale_embedder\.'
+  - '^fm_modules\.vision_model_mot_gen\.'
+  - '^fm_modules\.fm_head\.'
+
+train:
+  steps: 6000
+  lr: 5.0e-5
+  seed: 0
+  shuffle: true
+  grad_accum: 1
+  checkpoint_every: 600
+
+runtime:
+  keep_kvs_on_gpu: true
+  gc_skip_last: 6
+  device: cuda
+  cpu_device: cpu

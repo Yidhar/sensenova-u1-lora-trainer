@@ -1,0 +1,59 @@
+# SenseNova-U1 LoRA trainer — default config
+#
+# This is the recommended starting point. Trains a LoRA whose module
+# coverage matches the official 8-step distill LoRA (168 attn + 126 mlp +
+# 2 fm_head = 296 wraps), but at rank 64 instead of upstream's rank 128.
+# Roughly 75 M trainable LoRA params, ~750 MB on disk in fp32.
+#
+# Edit `data.data_dir`, `style.trigger`, and `run_name` and you should be
+# good to go for a 32 GB single-GPU run.
+
+run_name: my_run
+
+data:
+  # Directory of paired files: <id>.{jpg,png,webp} + <id>.txt
+  data_dir: dataset/my_style
+  # Per-image pixel cap. 4194304 = 2048×2048; 65536 = 256×256.
+  cap_max_pixels: 4194304
+  # Snap each image to nearest official bucket so train shape == infer shape.
+  snap_bucket: true
+  # n_samples: cap on dataset size (omit / null = use entire data_dir)
+
+style:
+  trigger: "my style"            # prepended to every caption (must match sample-time)
+  prompt_template: official      # 'official' (recommended) | 'plain'
+
+lora:
+  # Named preset: 'default' = official coverage at rank 64.
+  # Other presets: 'attn_only', 'attn_mlp', 'official_r128'.
+  preset: default
+  # Or override per-target:
+  # spec: "attn=r64a64;mlp=r64a64;fm_head=r64a64;mlp_mot_gen.down_proj=off"
+  dropout: 0.0
+
+unfreeze:
+  # Full-finetune (non-LoRA) regex patterns. Empty = LoRA-only training.
+  # Examples for our v16c-style recipe:
+  # - '^fm_modules\.timestep_embedder\.'
+  # - '^fm_modules\.noise_scale_embedder\.'
+  # - '^fm_modules\.vision_model_mot_gen\.'
+  []
+
+train:
+  steps: 6000
+  lr: 5.0e-5
+  seed: 0
+  shuffle: true
+  grad_accum: 1
+  checkpoint_every: 600          # 0 = only save final state
+  # checkpoint_dir: null         # default: artifacts/{run_name}/checkpoints
+
+runtime:
+  keep_kvs_on_gpu: true          # 56 samples × ~59 MB = ~3.3 GB; keep on GPU for speed
+  gc_skip_last: 6                # skip GC on last 6 layers (trade VRAM for speed)
+  device: cuda
+  cpu_device: cpu
+  # Optional: bake-in merge an upstream-format LoRA into base before training.
+  # Useful for stacking on top of the official 8-step distill LoRA.
+  # upstream_lora_path: null
+  # upstream_lora_skip: ['fm_modules.fm_head']

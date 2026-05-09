@@ -1,0 +1,25 @@
+# Pinned to what runs on the dev box (RTX 5090, CUDA 12.8). Versions are
+# observed-baselines, not strict floors — bump as upstream/drivers move.
+
+# core
+torch>=2.9
+transformers>=5.6
+safetensors>=0.7
+
+# HF model load (NEOChatModel uses trust_remote_code)
+huggingface_hub>=0.26
+sentencepiece
+einops
+pillow
+numpy
+
+# low-VRAM training
+bitsandbytes>=0.45    # 8-bit / 4-bit base + paged AdamW8bit
+peft>=0.13            # not strictly required (we have our own LoRA), pulled in for utility helpers
+
+# config
+pyyaml
+pydantic>=2.0
+
+# tests
+pytest>=7

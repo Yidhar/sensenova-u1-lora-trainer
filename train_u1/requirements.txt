@@ -1,0 +1,30 @@
+# Pinned to the environment available on the dev box (RTX 5090, CUDA 12.8).
+# Versions are observed-baselines, not strict floors — bump as the upstream
+# repo / drivers move.
+
+# core
+torch>=2.9
+transformers>=5.6
+safetensors>=0.7
+
+# HF model load (NEOChatModel uses trust_remote_code)
+huggingface_hub>=0.26
+sentencepiece
+einops
+pillow
+numpy
+
+# low-VRAM training (not yet installed in the dev env — install before MVP run)
+bitsandbytes>=0.45  # 8-bit AdamW + 4-bit base
+peft>=0.13          # LoRA on _mot_gen attention/MLP
+
+# optional acceleration (correctness-first; defer flash-attn/torch.compile)
+# flash-attn>=2.7
+
+# tooling
+pyyaml
+pydantic>=2.0
+pytest
+
+# eval / probing
+clip-by-openai  # CLIPScore proxy; swap if a better metric is preferred

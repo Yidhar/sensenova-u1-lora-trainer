@@ -1,0 +1,15 @@
+{
+  "commit": "df86ca90bfcd95fbdd1e2b3a590822721dba8cd1",
+  "source_repo": "https://github.com/OpenSenseNova/SenseNova-U1",
+  "files": {
+    "__init__.py":               "77189b8654a61db83821d9df2202a238637ae04ea79ab37914969c7db93778b2",
+    "configuration_neo_chat.py": "0559b681b7ccf4355e3bd918c0b3dcab6f673eedd3948213d7d2fa3f18367566",
+    "configuration_neo_vit.py":  "17d024a39e4b0c320b2078ebb14065907b015fa8068e812760f365381e63428f",
+    "conversation.py":           "0afd416e8875789404745ab9f05445ce2f9492a7da7b34c67436424c84f68435",
+    "modeling_fm_modules.py":    "7529a684527177b3f692c56209f3704833f0c4000d345547c372cb50413993c8",
+    "modeling_neo_chat.py":      "19faa80e9e4f59defbffb7ac737c5d31e68664734c1a774974aa22d3aa08aa16",
+    "modeling_neo_vit.py":       "98cadea49f6bde097b3644b6fa2ad908e0ff16dc47b2b7b6fcd9984b6419300d",
+    "modeling_qwen3.py":         "e03318b0dbc9041424abdf79c9ef5ea9c3d91b6e9c64128dbb5c8f8327962589",
+    "utils.py":                  "6ba5efaa8bdf9a33fd3ab63767f0c8697906897ab25bacc4c3dd88926c4da003"
+  }
+}
