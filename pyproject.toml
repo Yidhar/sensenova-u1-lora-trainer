@@ -32,10 +32,13 @@ classifiers = [
 ]
 dependencies = [
   "torch>=2.9",
-  # Upper bound: transformers 5.8 broke the upstream `modeling_qwen3.py`
-  # we pin (rope_theta moved into rope_parameters dict, all_tied_weights_keys
-  # appeared, RotaryEmbedding now needs `compute_default_rope_parameters`).
-  "transformers>=5.6,<5.8",
+  # Hard-pin: the upstream `modeling_qwen3.py` we vendor (commit df86ca9)
+  # was written against transformers 4.57.1 and reads `config.rope_theta`
+  # directly. transformers 5.x moved that into a `rope_parameters` dict,
+  # which silently breaks attention frequencies and produces noise images
+  # at sample time even when the LoRA + base load cleanly. Stay on 4.57.1
+  # until we either re-train or rewrite the modeling files.
+  "transformers==4.57.1",
   "safetensors>=0.7",
   "huggingface_hub>=0.26",
   "sentencepiece",
