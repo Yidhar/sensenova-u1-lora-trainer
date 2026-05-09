@@ -204,14 +204,28 @@ class SenseNovaU1Collator:
         else:
             raw_prompts = [s.prompt for s in samples]
         if self._build_t2i_query is not None:
-            prompts = [
-                self._build_t2i_query(
-                    rp,
-                    system_message=self._sys_msg_for_gen,
-                    append_text=self._gen_append,
+            prompts = []
+            for rp, s in zip(raw_prompts, samples):
+                # Per-sample think injection: when the dataset supplies a
+                # `think` text, render it INSIDE the otherwise-empty
+                # `<think></think>` block of the official prompt template.
+                # This makes training distribution match inference-time
+                # `--think-mode`, where the model autoregressively fills the
+                # same window with ~250-400 reasoning tokens. Without this,
+                # the gen tower sees an unfamiliar prefix length/content
+                # at inference and the LoRA delta is calibrated against
+                # the wrong cond-KV distribution.
+                if s.think:
+                    append_text = f"<think>\n{s.think}\n</think>\n\n<img>"
+                else:
+                    append_text = self._gen_append
+                prompts.append(
+                    self._build_t2i_query(
+                        rp,
+                        system_message=self._sys_msg_for_gen,
+                        append_text=append_text,
+                    )
                 )
-                for rp in raw_prompts
-            ]
         else:
             prompts = list(raw_prompts)
         input_ids, text_lens = self._tokenize(prompts)

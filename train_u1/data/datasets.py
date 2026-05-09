@@ -32,6 +32,12 @@ class T2ISample:
     prompt: str
     image: torch.Tensor      # (3, H, W) in [0, 1] or normalized — collator decides
     seed: int = 0
+    # Optional pre-computed `<think>...</think>` reasoning text. When set, the
+    # collator embeds it INSIDE the empty think block of the official prompt
+    # template, so training distribution matches inference-time `--think-mode`.
+    # When None, the empty `<think>\n\n</think>` block is preserved (matches
+    # inference-time without `--think-mode`).
+    think: str | None = None
 
 
 class SyntheticT2ITinyDataset(Dataset):
@@ -164,13 +170,168 @@ class PairedFolderT2IDataset(Dataset):
 
         img_path, txt_path, stem = self.pairs[idx]
         with open(txt_path, encoding="utf-8") as f:
-            caption = f.read().strip()
+            raw = f.read()
+        caption, think_text = parse_caption_and_think(raw)
         if self.prompt_template:
             caption = self.prompt_template.format(caption=caption)
+        # Legacy fallback: `<id>.think.txt` separate sidecar (deprecated;
+        # `parse_caption_and_think` is the preferred path).
+        if think_text is None:
+            think_path = img_path.with_suffix(".think.txt")
+            if think_path.is_file():
+                with open(think_path, encoding="utf-8") as f:
+                    think_text = f.read().strip() or None
         chw, _hw = load_and_preprocess_image(
             img_path,
             cap_max_pixels=self.cap_max_pixels,
             normalize="x0",  # 公开证据显示 — fm_head output space, [-1, 1] (NOT ImageNet)
             snap_bucket=self.snap_bucket,
         )
-        return T2ISample(sample_id=stem, prompt=caption, image=chw, seed=hash(stem) & 0xFFFF)
+        return T2ISample(
+            sample_id=stem, prompt=caption, image=chw,
+            seed=hash(stem) & 0xFFFF, think=think_text,
+        )
+
+
+# Marker used inside a single `.txt` to separate caption from think label.
+# Any whitespace tolerated around the marker; case-insensitive on the
+# `THINK` keyword. Pick a marker unlikely to appear in natural prose.
+THINK_DELIMITER_RE = __import__("re").compile(r"^\s*-{3,}\s*think\s*-{3,}\s*$", flags=__import__("re").IGNORECASE | __import__("re").MULTILINE)
+
+
+def parse_caption_and_think(raw: str) -> tuple[str, str | None]:
+    """Split a caption file into `(caption, think)` parts.
+
+    The new compact format puts both labels in a single `.txt`::
+
+        A natural-language caption embedding the artist style.
+        ---think---
+        1. **Instruction Understanding:** ...
+        ...
+        6. **Explicit Prompt:** ...
+
+    Falls back to "whole file is caption, no think" for plain captions.
+    Returns `(caption, None)` if no marker is present, else `(caption, think)`
+    with both stripped.
+    """
+    m = THINK_DELIMITER_RE.search(raw)
+    if m is None:
+        return raw.strip(), None
+    caption = raw[: m.start()].strip()
+    think = raw[m.end():].strip()
+    return caption, (think or None)
+
+
+# --------------------------------------------------------------------------- #
+# ArrowT2IDataset (large-scale)                                               #
+# --------------------------------------------------------------------------- #
+
+
+class ArrowT2IDataset(Dataset):
+    """T2I dataset backed by a parquet/arrow shard.
+
+    Schema expected (rows aligned with `T2ISample` fields):
+        - `sample_id` : string
+        - `caption`   : string
+        - `think`     : string (optional; nullable column)
+        - `image`     : binary (raw image bytes, e.g. PNG/JPEG) — preferred
+                         OR `image_path` : string (path resolved relative to
+                         `image_root` if relative, else absolute)
+
+    Reads via `pyarrow` table-of-shards mmap, so memory-efficient even at
+    millions of rows. Suitable for the 1M-image scaling experiment (task #53).
+
+    Args:
+        path: parquet file or directory of parquet shards
+        image_root: base dir to resolve relative `image_path` columns
+        cap_max_pixels: optional VRAM-friendly cap (passed to smart_resize)
+        prompt_template: optional template (matches PairedFolderT2IDataset)
+        snap_bucket: snap to nearest official bucket
+    """
+
+    def __init__(
+        self,
+        path: str | os.PathLike,
+        *,
+        image_root: str | os.PathLike | None = None,
+        cap_max_pixels: int | None = None,
+        prompt_template: str | None = None,
+        snap_bucket: bool = False,
+    ):
+        try:
+            import pyarrow.parquet as pq  # noqa: F401
+        except ImportError as e:
+            raise ImportError(
+                "ArrowT2IDataset requires pyarrow. Install with `pip install pyarrow>=14`."
+            ) from e
+        self.path = Path(path)
+        self.image_root = Path(image_root) if image_root else None
+        self.cap_max_pixels = cap_max_pixels
+        self.prompt_template = prompt_template
+        self.snap_bucket = snap_bucket
+        self._table = None  # lazy-loaded
+        self._n: int | None = None
+
+    def _ensure_table(self):
+        if self._table is not None:
+            return
+        import pyarrow.parquet as pq
+        if self.path.is_dir():
+            # Directory of shards — read combined.
+            self._table = pq.read_table(str(self.path))
+        else:
+            self._table = pq.read_table(str(self.path))
+        cols = self._table.column_names
+        # Schema sanity
+        if "sample_id" not in cols or "caption" not in cols:
+            raise RuntimeError(
+                f"{self.path}: required columns missing. "
+                f"Schema must include `sample_id` and `caption`. Got: {cols}"
+            )
+        if "image" not in cols and "image_path" not in cols:
+            raise RuntimeError(
+                f"{self.path}: must have either `image` (bytes) or `image_path` (string). Got: {cols}"
+            )
+        self._n = self._table.num_rows
+
+    def __len__(self) -> int:
+        self._ensure_table()
+        return self._n  # type: ignore[return-value]
+
+    def __getitem__(self, idx: int) -> T2ISample:
+        from io import BytesIO
+
+        from train_u1.data.u1_preprocess import (
+            load_and_preprocess_image,
+            preprocess_pil_image,
+        )
+
+        self._ensure_table()
+        row = self._table.slice(idx, 1).to_pydict()
+        sample_id = row["sample_id"][0]
+        caption = row["caption"][0]
+        think = (row.get("think") or [None])[0] or None
+
+        if "image" in self._table.column_names and row["image"][0] is not None:
+            from PIL import Image
+            pil = Image.open(BytesIO(row["image"][0])).convert("RGB")
+            chw, _hw = preprocess_pil_image(
+                pil, cap_max_pixels=self.cap_max_pixels,
+                normalize="x0", snap_bucket=self.snap_bucket,
+            )
+        else:
+            img_path_str = row["image_path"][0]
+            img_path = Path(img_path_str)
+            if not img_path.is_absolute() and self.image_root is not None:
+                img_path = self.image_root / img_path
+            chw, _hw = load_and_preprocess_image(
+                img_path, cap_max_pixels=self.cap_max_pixels,
+                normalize="x0", snap_bucket=self.snap_bucket,
+            )
+
+        if self.prompt_template:
+            caption = self.prompt_template.format(caption=caption)
+        return T2ISample(
+            sample_id=str(sample_id), prompt=str(caption), image=chw,
+            seed=hash(sample_id) & 0xFFFF, think=think,
+        )

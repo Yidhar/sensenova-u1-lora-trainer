@@ -20,9 +20,10 @@ numpy
 bitsandbytes>=0.45    # 8-bit / 4-bit base + paged AdamW8bit
 peft>=0.13            # not strictly required (we have our own LoRA), pulled in for utility helpers
 
-# config
+# config + dataset
 pyyaml
 pydantic>=2.0
+pyarrow>=14         # ArrowT2IDataset (parquet shards) for 1M+ scale datasets
 
 # tests
 pytest>=7

@@ -101,6 +101,50 @@ def snap_to_official_bucket(H: int, W: int) -> tuple[int, int]:
     return best
 
 
+def preprocess_pil_image(
+    img: Image.Image,
+    *,
+    factor: int = PATCH32,
+    min_pixels: int = SMART_RESIZE_MIN_PIXELS,
+    max_pixels: int = SMART_RESIZE_MAX_PIXELS,
+    cap_max_pixels: int | None = None,
+    normalize: str = "x0",
+    snap_bucket: bool = False,
+) -> tuple[torch.Tensor, tuple[int, int]]:
+    """In-memory variant of `load_and_preprocess_image` taking a PIL.Image.
+
+    Use this for arrow/parquet datasets that decode image bytes inline.
+    Returns `(image_chw, (H, W))` with the same conventions.
+    """
+    img = img.convert("RGB")
+    W, H = img.size
+    if snap_bucket:
+        H_bar, W_bar = snap_to_official_bucket(H, W)
+    else:
+        eff_max = min(max_pixels, cap_max_pixels) if cap_max_pixels is not None else max_pixels
+        H_bar, W_bar = smart_resize(H, W, factor=factor, min_pixels=min_pixels, max_pixels=eff_max)
+    img = img.resize((W_bar, H_bar))
+
+    import numpy as np
+
+    arr = np.asarray(img).astype("float32") / 255.0
+    if normalize == "x0":
+        mean = np.array(X0_MEAN, dtype="float32")
+        std = np.array(X0_STD, dtype="float32")
+        arr = (arr - mean) / std
+    elif normalize == "vision":
+        mean = np.array(IMAGENET_MEAN, dtype="float32")
+        std = np.array(IMAGENET_STD, dtype="float32")
+        arr = (arr - mean) / std
+    elif normalize == "none":
+        pass
+    else:
+        raise ValueError(f"normalize must be 'x0' / 'vision' / 'none', got {normalize!r}")
+
+    chw = torch.from_numpy(arr.transpose(2, 0, 1))
+    return chw, (H_bar, W_bar)
+
+
 def load_and_preprocess_image(
     path: str | Path,
     *,
@@ -130,30 +174,8 @@ def load_and_preprocess_image(
     shape, eliminating the "trained on arbitrary shape, sampled at 2048²"
     mismatch.
     """
-    img = Image.open(path).convert("RGB")
-    W, H = img.size
-    if snap_bucket:
-        H_bar, W_bar = snap_to_official_bucket(H, W)
-    else:
-        eff_max = min(max_pixels, cap_max_pixels) if cap_max_pixels is not None else max_pixels
-        H_bar, W_bar = smart_resize(H, W, factor=factor, min_pixels=min_pixels, max_pixels=eff_max)
-    img = img.resize((W_bar, H_bar))
-
-    import numpy as np
-
-    arr = np.asarray(img).astype("float32") / 255.0  # (H, W, 3) in [0, 1]
-    if normalize == "x0":
-        mean = np.array(X0_MEAN, dtype="float32")
-        std = np.array(X0_STD, dtype="float32")
-        arr = (arr - mean) / std  # → [-1, 1]
-    elif normalize == "vision":
-        mean = np.array(IMAGENET_MEAN, dtype="float32")
-        std = np.array(IMAGENET_STD, dtype="float32")
-        arr = (arr - mean) / std
-    elif normalize == "none":
-        pass
-    else:
-        raise ValueError(f"normalize must be 'x0' / 'vision' / 'none', got {normalize!r}")
-
-    chw = torch.from_numpy(arr.transpose(2, 0, 1))  # (3, H, W)
-    return chw, (H_bar, W_bar)
+    img = Image.open(path)
+    return preprocess_pil_image(
+        img, factor=factor, min_pixels=min_pixels, max_pixels=max_pixels,
+        cap_max_pixels=cap_max_pixels, normalize=normalize, snap_bucket=snap_bucket,
+    )

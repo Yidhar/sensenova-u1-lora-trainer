@@ -44,7 +44,7 @@ import torch
 from train_u1.config import TrainRunConfig, load_train_config
 from train_u1.constants import MODEL_ID, MODEL_SHA
 from train_u1.data.collators import CollatorConfig, SenseNovaU1Collator, to_device
-from train_u1.data.datasets import PairedFolderT2IDataset
+from train_u1.data.datasets import ArrowT2IDataset, PairedFolderT2IDataset
 from train_u1.model.loader import _resolve_local_snapshot, load_neo_chat
 from train_u1.model.losses import fm_loss_x0
 from train_u1.model.lora import (
@@ -380,13 +380,23 @@ def main() -> int:
         trust_remote_code=True,
     )
 
-    # dataset + collator
-    ds = PairedFolderT2IDataset(
-        args.data_dir,
-        cap_max_pixels=args.cap_max_pixels,
-        snap_bucket=args.snap_bucket,
-    )
-    n_use = min(args.n_samples, len(ds))
+    # dataset + collator. Auto-dispatch on data_dir suffix:
+    #   .parquet     → ArrowT2IDataset (single shard or directory)
+    #   anything else, including a `.parquet`-less directory → PairedFolderT2IDataset
+    _data_path = Path(args.data_dir)
+    if _data_path.suffix == ".parquet" or (_data_path.is_dir() and any(_data_path.glob("*.parquet"))):
+        ds = ArrowT2IDataset(
+            _data_path,
+            cap_max_pixels=args.cap_max_pixels,
+            snap_bucket=args.snap_bucket,
+        )
+    else:
+        ds = PairedFolderT2IDataset(
+            args.data_dir,
+            cap_max_pixels=args.cap_max_pixels,
+            snap_bucket=args.snap_bucket,
+        )
+    n_use = len(ds) if args.n_samples is None else min(args.n_samples, len(ds))
     samples = [ds[i] for i in range(n_use)]
     collator = SenseNovaU1Collator(
         tok,

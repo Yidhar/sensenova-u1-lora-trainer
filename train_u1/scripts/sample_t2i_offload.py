@@ -304,7 +304,7 @@ def t2i_generate_offload(
             think_text = tokenizer.decode(think_token_ids, skip_special_tokens=False)
             if verbose:
                 tt = think_text.strip().replace("\n", " ")
-                print(f"[offload]   think generated +{cond_t_idx_extra} tokens: {tt[:160]!r}", flush=True)
+                print(f"[offload]   think generated +{cond_t_idx_extra} tokens (full): {tt!r}", flush=True)
         else:
             cond_kv, _ = model._t2i_prefix_forward(cond_ids, cond_idx, cond_attn)
         uncond_kv, _ = model._t2i_prefix_forward(uncond_ids, uncond_idx, uncond_attn)

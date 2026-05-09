@@ -74,7 +74,9 @@ HF_HOME=$PWD/hf_cache python -m train_u1.scripts.install_modeling_into_snapshot 
 
 ## Train
 
-1. Lay out your data:
+1. Lay out your data. Two formats are supported.
+
+   **Folder of paired files** (recommended for ≤ ~10k images):
 
    ```
    dataset/my_style/
@@ -83,9 +85,44 @@ HF_HOME=$PWD/hf_cache python -m train_u1.scripts.install_modeling_into_snapshot 
    └── …           └── …
    ```
 
-   Each `.txt` is a plain-text caption. The style trigger string (`my style`,
-   `hayateluc style`, …) is **prepended** at training time — don't bake it
-   into the captions yourself.
+   Each `.txt` is a single-paragraph natural-language caption. Embed the
+   artist credit / style anchor inside the description naturally — don't
+   rely on a hard-coded trigger prepend (`style.trigger` in the YAML is
+   for backward compat only; the v18 recipe uses an empty trigger).
+
+   **Optional**: append a `<think>...</think>` reasoning label inside the
+   same `.txt` after a `---think---` delimiter line:
+
+   ```
+   An illustration by Hayateluc depicting a wisteria-trellis path under
+   morning glow, painterly composition, no people.
+   ---think---
+   1. **Instruction Understanding:** ...
+   6. **Explicit Prompt:** ...
+   ```
+
+   When present, the trainer renders this into the prompt template's
+   `<think>` window so train-time distribution matches inference
+   `--think-mode` (avoids prefix-distribution shift on long autoregressive
+   think). For batch generation of think labels see Agent B's prompt in
+   the v18 commit history; or write them yourself in the upstream
+   6-section format.
+
+   **Parquet/arrow shards** (recommended for ≥ ~10k images, e.g. 1M
+   scaling):
+
+   ```bash
+   # Pack a folder dataset → single parquet shard
+   python -m train_u1.scripts.dataset_tools pack-arrow dataset/my_style \
+       --out artifacts/my_style.parquet
+   # Inspect first 3 rows
+   python -m train_u1.scripts.dataset_tools inspect-arrow artifacts/my_style.parquet
+   ```
+
+   Schema: `sample_id, caption, think (nullable), image (binary)`. Set
+   `data.data_dir` in the YAML to point at the parquet path; the training
+   script auto-detects `.parquet` and uses `ArrowT2IDataset` instead of
+   `PairedFolderT2IDataset`.
 
 2. Edit `configs/default.yaml`. The only fields you must touch:
 
