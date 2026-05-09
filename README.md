@@ -309,4 +309,4 @@ At sample time, also pass the same upstream LoRA:
   release; consumed via the `upstream_lora_path` mechanism.
 - **This trainer** is licensed under Apache-2.0 (see `LICENSE`).
 
-**Thanks to comfy.org for the compute support. The open-source community will not forget.**
+**Thanks to comfy.org for the GPU power support. The open-source community will not forget.**
