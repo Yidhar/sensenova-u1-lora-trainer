@@ -1,3 +1,7 @@
+---
+base_model:
+- sensenova/SenseNova-U1-8B-MoT
+---
 # train_u1 — simple LoRA trainer for SenseNova-U1-8B-MoT
 
 A single-GPU LoRA / partial-finetune trainer for
@@ -304,3 +308,5 @@ At sample time, also pass the same upstream LoRA:
 - **8-step distill LoRA**: `sensenova/SenseNova-U1-8B-MoT-LoRAs` — public
   release; consumed via the `upstream_lora_path` mechanism.
 - **This trainer** is licensed under Apache-2.0 (see `LICENSE`).
+
+**Thanks to comfy.org for the compute support. The open-source community will not forget.**
