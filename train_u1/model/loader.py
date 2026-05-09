@@ -77,7 +77,37 @@ def load_neo_chat(
     if local is None:
         kwargs["revision"] = revision
         kwargs["cache_dir"] = cache_dir
-    return AutoModel.from_pretrained(pretrained, **kwargs)
+
+    try:
+        return AutoModel.from_pretrained(pretrained, **kwargs)
+    except FileNotFoundError as e:
+        # transformers' dynamic-module copy walks `auto_map` entries but does
+        # NOT recurse into indirect relative imports (e.g.
+        # `configuration_neo_chat.py` imports `configuration_neo_vit.py` —
+        # the latter never gets copied to the hash dir, breaking loads on
+        # transformers >= 5.x). Detect that specific failure and fix it
+        # in-place by copying every modeling .py from the local snapshot to
+        # the missing hash dir, then retry once.
+        if local is None or "transformers_modules" not in str(e):
+            raise
+        import shutil
+        from pathlib import Path as _Path
+        miss_path = _Path(str(e).split("'")[1] if "'" in str(e) else "")
+        target_dir = miss_path.parent if miss_path.parent.exists() else None
+        if target_dir is None:
+            raise
+        snap = _Path(local)
+        n = 0
+        for src in snap.glob("*.py"):
+            dst = target_dir / src.name
+            if not dst.exists():
+                shutil.copy2(src, dst)
+                n += 1
+        print(
+            f"[loader] copied {n} modeling .py from {snap} → {target_dir} "
+            f"(transformers dynamic-cache fixup), retrying load..."
+        )
+        return AutoModel.from_pretrained(pretrained, **kwargs)
 
 
 _DEFAULT_KEEP_MODULES_IN_FP: tuple[str, ...] = (

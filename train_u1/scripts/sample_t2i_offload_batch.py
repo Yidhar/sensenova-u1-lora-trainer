@@ -209,7 +209,6 @@ def main() -> int:
             from train_u1.model.lora_io import load_lora_state
             load_lora_state(model, state_path)
             print(f"[batch] inject took {time.time()-t_inj:.1f}s")
-            del loaded
 
         for i, prompt in enumerate(prompts):
             idx = f"{i:02d}"

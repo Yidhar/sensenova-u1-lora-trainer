@@ -3,7 +3,11 @@
 
 # core
 torch>=2.9
-transformers>=5.6
+# Upper bound: transformers 5.8 reshuffled rope params API + tied_weights
+# ABI in incompatible ways with the upstream `modeling_qwen3.py` we pin.
+# See loader.py for the indirect-import self-heal that survives upstream
+# transformers churn beyond what version-pinning catches.
+transformers>=5.6,<5.8
 safetensors>=0.7
 
 # HF model load (NEOChatModel uses trust_remote_code)
