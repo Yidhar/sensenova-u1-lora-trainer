@@ -16,7 +16,7 @@ checkpoints drop straight into the official inference scripts.
 ```
 
 Fits on a 32 GB GPU (RTX 5090 / A100-40 / RTX 6000 Ada). Peak VRAM ~20 GB
-on the maintainer's 56-image hayateluc dataset at 2048².
+on the train dataset at 2048².
 
 ---
 
