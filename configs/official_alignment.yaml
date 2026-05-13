@@ -1,0 +1,57 @@
+# Optional official-consistency research config.
+#
+# This keeps the public SenseNova-U1 report knobs together:
+#   - v-loss
+#   - logit-normal t sampler, mean=-0.8 std=0.8
+#   - train-time condition dropout, text=0.10 and both=0.10
+#   - think labels enabled when the dataset provides them
+#
+# Do not treat this as the small-data style-training default. The ablation
+# study showed weaker sampling than the default baseline on the 56-image
+# Hayateluc task. Use this config when you explicitly want to study report
+# alignment, not when you want the safest first run.
+
+run_name: official_alignment
+
+data:
+  data_dir: dataset/my_style
+  cap_max_pixels: 4194304
+  snap_bucket: true
+  use_think_labels: true
+
+style:
+  trigger: ""                    # prefer captions that carry their own style anchor
+  prompt_template: official
+
+lora:
+  # Matches upstream 8-step LoRA coverage at r=64.
+  preset: default
+  dropout: 0.0
+
+unfreeze:
+  - '^fm_modules\.timestep_embedder\.'
+  - '^fm_modules\.noise_scale_embedder\.'
+  - '^fm_modules\.vision_model_mot_gen\.'
+  - '^fm_modules\.fm_head\.'
+
+train:
+  steps: 6000
+  lr: 5.0e-5
+  seed: 0
+  shuffle: true
+  grad_accum: 1
+  checkpoint_every: 600
+  loss_type: v
+  t_dist: logit_normal
+  t_logit_mean: -0.8
+  t_logit_std: 0.8
+  cond_dropout_text: 0.10
+  cond_dropout_both: 0.10
+
+runtime:
+  # Long think prefixes and unconditional-prefix precompute can push VRAM up.
+  # Offload KVs and checkpoint all layers unless you have confirmed headroom.
+  keep_kvs_on_gpu: false
+  gc_skip_last: 0
+  device: cuda
+  cpu_device: cpu

@@ -59,6 +59,8 @@ def test_collator_shapes_match_forward_contract():
     assert batch["position_indexes"].shape == (3, L_text + N)
     assert batch["attn_mask"].shape == (1, 1, L_text + N, L_text + N)
     assert batch["attn_mask_prefix"].shape == (1, 1, L_text, L_text)
+    assert batch["cond_drop_mode"] == ["none"]
+    assert batch["prefix_cache_key"] == ["cond"]
 
 
 def test_collator_rejects_batch_gt_one_in_native_mode():
@@ -129,3 +131,54 @@ def test_collator_attn_mask_block_invariants():
 
     # text rows are blind to image rows (image t > text t at higher arange)
     assert not can_attend[:L_text, L_text:].any()
+
+
+def test_condition_dropout_text_mode_uses_uncond_prefix_key():
+    ds = SyntheticT2ITinyDataset(n=1, image_hw=(64, 64))
+    cfg = CollatorConfig(
+        image_hw=(64, 64),
+        seed=0,
+        cond_dropout_text=1.0,
+        cond_dropout_both=0.0,
+    )
+    collator = SenseNovaU1Collator(_MockTokenizer(), cfg=cfg)
+
+    batch = collator([ds[0]])
+
+    assert batch["cond_drop_mode"] == ["text"]
+    assert batch["prefix_cache_key"] == ["uncond"]
+    assert batch["cond_drop_text"].tolist() == [True]
+
+
+def test_condition_dropout_both_mode_is_logged_separately():
+    ds = SyntheticT2ITinyDataset(n=1, image_hw=(64, 64))
+    cfg = CollatorConfig(
+        image_hw=(64, 64),
+        seed=0,
+        cond_dropout_text=0.0,
+        cond_dropout_both=1.0,
+    )
+    collator = SenseNovaU1Collator(_MockTokenizer(), cfg=cfg)
+
+    batch = collator([ds[0]])
+
+    assert batch["cond_drop_mode"] == ["text_image"]
+    assert batch["prefix_cache_key"] == ["uncond"]
+    assert batch["cond_drop_text"].tolist() == [True]
+
+
+def test_condition_dropout_can_be_forced_off():
+    ds = SyntheticT2ITinyDataset(n=1, image_hw=(64, 64))
+    cfg = CollatorConfig(
+        image_hw=(64, 64),
+        seed=0,
+        cond_dropout_text=0.0,
+        cond_dropout_both=0.0,
+    )
+    collator = SenseNovaU1Collator(_MockTokenizer(), cfg=cfg)
+
+    batch = collator([ds[0]])
+
+    assert batch["cond_drop_mode"] == ["none"]
+    assert batch["prefix_cache_key"] == ["cond"]
+    assert batch["cond_drop_text"].tolist() == [False]

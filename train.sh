@@ -2,12 +2,12 @@
 # train.sh — quick-launch a LoRA training run from a YAML config.
 #
 # Usage:
-#   ./train.sh                              # uses configs/default.yaml
-#   ./train.sh configs/v16c.yaml
-#   ./train.sh configs/v16c.yaml --steps 12000   # extra args forwarded
+#   ./train.sh                                # uses configs/default.yaml
+#   ./train.sh configs/my_style.yaml
+#   ./train.sh configs/my_style.yaml --steps 12000   # extra args forwarded
 #
 # Long-running training tip:
-#   setsid nohup ./train.sh configs/v16c.yaml </dev/null >run.log 2>&1 &
+#   setsid nohup ./train.sh configs/my_style.yaml </dev/null >run.log 2>&1 &
 #   disown
 # (a bare `nohup &` can be SIGHUP'd when the SSH/IDE session disconnects).
 

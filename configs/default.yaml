@@ -1,9 +1,11 @@
 # SenseNova-U1 LoRA trainer — default config
 #
-# This is the recommended starting point. Trains a LoRA whose module
-# coverage matches the official 8-step distill LoRA (168 attn + 126 mlp +
-# 2 fm_head = 296 wraps), but at rank 64 instead of upstream's rank 128.
-# Roughly 75 M trainable LoRA params, ~750 MB on disk in fp32.
+# This is the recommended starting point for small/medium style training.
+# It follows the local small-data baseline: x0 loss + uniform t + no train-time
+# condition dropout, explicit style trigger, LoRA on attn+mlp, and full-FT
+# of ts/ns/vision/fm_head. Public official-consistency knobs are available
+# in configs/official_alignment.yaml for research ablations, but they are
+# not the default because the ablation study showed worse small-data sampling.
 #
 # Edit `data.data_dir`, `style.trigger`, and `run_name` and you should be
 # good to go for a 32 GB single-GPU run.
@@ -17,6 +19,9 @@ data:
   cap_max_pixels: 4194304
   # Snap each image to nearest official bucket so train shape == infer shape.
   snap_bucket: true
+  # Keep the prefix short by default. Set true only when your think labels are
+  # curated and your sampling path uses the same think distribution.
+  use_think_labels: false
   # n_samples: cap on dataset size (omit / null = use entire data_dir)
 
 style:
@@ -24,20 +29,21 @@ style:
   prompt_template: official      # 'official' (recommended) | 'plain'
 
 lora:
-  # Named preset: 'default' = official coverage at rank 64.
-  # Other presets: 'attn_only', 'attn_mlp', 'official_r128'.
-  preset: default
+  # Small-data baseline: LoRA on attn+mlp only. fm_head is full-FT'd below.
+  # 'default' remains available when you explicitly want upstream 8-step
+  # coverage including fm_head LoRA.
+  # A3B/MoE presets are experimental compatibility helpers, not the main path.
+  preset: attn_mlp_no_head
   # Or override per-target:
-  # spec: "attn=r64a64;mlp=r64a64;fm_head=r64a64;mlp_mot_gen.down_proj=off"
+  # spec: "attn=r64a64;mlp=r64a64;mlp_mot_gen.down_proj=off"
   dropout: 0.0
 
 unfreeze:
-  # Full-finetune (non-LoRA) regex patterns. Empty = LoRA-only training.
-  # Examples for our v16c-style recipe:
-  # - '^fm_modules\.timestep_embedder\.'
-  # - '^fm_modules\.noise_scale_embedder\.'
-  # - '^fm_modules\.vision_model_mot_gen\.'
-  []
+  # Full-finetune (non-LoRA) regex patterns for the small-data baseline.
+  - '^fm_modules\.timestep_embedder\.'
+  - '^fm_modules\.noise_scale_embedder\.'
+  - '^fm_modules\.vision_model_mot_gen\.'
+  - '^fm_modules\.fm_head\.'
 
 train:
   steps: 6000
@@ -47,6 +53,17 @@ train:
   grad_accum: 1
   checkpoint_every: 600          # 0 = only save final state
   # checkpoint_dir: null         # default: artifacts/{run_name}/checkpoints
+  # Local small-data baseline. See docs/small_data_style_ablation.html before changing these:
+  # official-style v-loss/logit-normal/dropout is an optional ablation path,
+  # not the small-data default.
+  loss_type: x0                  # 'x0' | 'v' | 'x0_huber' | 'v_huber'
+  t_dist: uniform                # 'uniform' | 'logit_normal'
+  t_logit_mean: -0.8             # only used for logit_normal
+  t_logit_std: 0.8               # only used for logit_normal
+  # huber_delta: 1.0             # only used for *_huber
+  # CFG / condition dropout. Keep off by default for small style datasets.
+  cond_dropout_text: 0.0
+  cond_dropout_both: 0.0
 
 runtime:
   keep_kvs_on_gpu: true          # 56 samples × ~59 MB = ~3.3 GB; keep on GPU for speed

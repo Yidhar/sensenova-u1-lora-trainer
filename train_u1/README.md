@@ -49,7 +49,10 @@ train_u1/
 ```
 
 **未实现 / pending**：
-- `model/peft_targets.py` — LoRA target 工具（实验 C 时落地）
+- `model/peft_targets.py` — 独立 LoRA target 工具仍未拆出；当前
+  `model/lora.py` 已内置 8B dense target 与实验性 A3B generation MoE
+  target grammar（`gen_moe_mlp` / `gen_moe_router`）。A3B/MoE 不是当前
+  主训练路径，必须等可实例化 `mlp_mot_gen.experts.*` 的公开 runtime。
 - `scripts/train_balanced.py` — 48GB 平衡场景（实验 C 后视效果决定）
 - `scripts/sample_t2i.py` 完整管线（依赖 wrapper 的 `t2i_generate` 钩子）
 

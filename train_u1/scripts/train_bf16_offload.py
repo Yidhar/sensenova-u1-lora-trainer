@@ -35,6 +35,7 @@ import argparse
 import gc
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -46,7 +47,7 @@ from train_u1.constants import MODEL_ID, MODEL_SHA
 from train_u1.data.collators import CollatorConfig, SenseNovaU1Collator, to_device
 from train_u1.data.datasets import ArrowT2IDataset, PairedFolderT2IDataset
 from train_u1.model.loader import _resolve_local_snapshot, load_neo_chat
-from train_u1.model.losses import fm_loss_x0
+from train_u1.model.losses import VALID_LOSS_TYPES, compute_v_target, fm_loss, fm_loss_x0, fm_loss_v
 from train_u1.model.lora import (
     LORA_PRESETS,
     apply_lora_specs,
@@ -81,18 +82,20 @@ def _trainable_params(model):
 def precompute_prefix_kvs(
     model,
     samples,
-    tokenizer,
     collator,
     *,
     cuda_device: str,
     cpu_device: str,
     classify: dict,
+    include_uncond: bool,
     verbose: bool = True,
-) -> list:
-    """Run prefix forward for each sample with ordinary tower on GPU.
+) -> dict[str, object]:
+    """Run prefix forward for conditional and optional unconditional CFG prefixes.
 
-    Returns list[ DynamicCache (with K/V tensors on `cpu_device`) ] aligned
-    with `samples` order.
+    Returns a dict with:
+    - ``cond``: per-sample DynamicCache list aligned with ``samples`` order
+    - ``uncond``: one shared unconditional DynamicCache when ``include_uncond``
+      is true, otherwise ``None``
     """
     if verbose:
         sz_prefix = _bytes_for(model, classify["prefix"]) / 1e9
@@ -107,9 +110,15 @@ def precompute_prefix_kvs(
             flush=True,
         )
 
-    kvs = []
+    # Prefix precompute only needs text inputs; collator still builds full FM
+    # batches, so preserve its training RNG streams around these calls.
+    collator_gen_state = collator._gen.get_state()
+    collator_cond_gen_state = collator._cond_gen.get_state()
+
+    cond_kvs = []
+    uncond_kv = None
     for i, sample in enumerate(samples):
-        batch = collator([sample])
+        batch = collator([sample], condition_modes=["none"])
         # Force prefix-relevant inputs to GPU for the no_grad forward.
         input_ids = batch["input_ids"].to(cuda_device)
         text_indexes = batch["text_indexes"].to(cuda_device)
@@ -125,7 +134,7 @@ def precompute_prefix_kvs(
         kv = prefix_out.past_key_values
         # Move KV to CPU (small — ~70 MB per sample at L_text~400)
         _cache_to(kv, cpu_device)
-        kvs.append(kv)
+        cond_kvs.append(kv)
         if verbose:
             print(
                 f"[bf16-offload]   precomputed prefix KV for sample {i+1}/{len(samples)} "
@@ -133,9 +142,65 @@ def precompute_prefix_kvs(
                 flush=True,
             )
 
+    if include_uncond and samples:
+        # The unconditional CFG prefix is prompt-independent, so cache it once
+        # and share it across all samples/steps.
+        batch = collator([samples[0]], condition_modes=["text"])
+        input_ids = batch["input_ids"].to(cuda_device)
+        text_indexes = batch["text_indexes"].to(cuda_device)
+        attn_mask_prefix = batch["attn_mask_prefix"].to(cuda_device)
+        with torch.no_grad():
+            prefix_out = model.language_model.model(
+                input_ids=input_ids,
+                indexes=text_indexes,
+                attention_mask={"full_attention": attn_mask_prefix},
+                use_cache=True,
+            )
+        uncond_kv = prefix_out.past_key_values
+        _cache_to(uncond_kv, cpu_device)
+        if verbose:
+            print(
+                f"[bf16-offload]   precomputed shared uncond prefix KV "
+                f"(L_text={input_ids.shape[1]})",
+                flush=True,
+            )
+
     if verbose:
         print(f"[bf16-offload] precompute total: {time.time()-t0:.1f}s", flush=True)
-    return kvs
+    collator._gen.set_state(collator_gen_state)
+    collator._cond_gen.set_state(collator_cond_gen_state)
+    return {"cond": cond_kvs, "uncond": uncond_kv}
+
+
+def _select_prefix_kv(prefix_kvs: dict[str, object], idx: int, prefix_key: str):
+    if prefix_key == "cond":
+        return prefix_kvs["cond"][idx]
+    if prefix_key == "uncond":
+        kv = prefix_kvs.get("uncond")
+        if kv is None:
+            raise RuntimeError("missing unconditional prefix KV; condition dropout requires include_uncond=True")
+        return kv
+    raise ValueError(f"unknown prefix_cache_key {prefix_key!r}")
+
+
+def _guard_static_prefix_unfreeze(unfreeze_patterns: list[str], classify: dict[str, list[str]]) -> None:
+    """Static prefix KVs make prefix/unused params effectively non-trainable."""
+    if not unfreeze_patterns:
+        return
+    compiled = [(pat, re.compile(pat)) for pat in unfreeze_patterns]
+    blocked_names = classify.get("prefix", []) + classify.get("unused", [])
+    hits: list[tuple[str, str]] = []
+    for pat, cre in compiled:
+        for name in blocked_names:
+            if cre.search(name):
+                hits.append((pat, name))
+                break
+    if hits:
+        details = "; ".join(f"{pat!r} matched {name}" for pat, name in hits[:5])
+        raise ValueError(
+            "unfreeze patterns cannot target prefix/unused tower params while static prefix KV cache is enabled; "
+            f"{details}. Restrict unfreeze to gen-side modules or use a non-cached training path."
+        )
 
 
 def evict_ordinary_load_gen(model, classify, cuda_device, cpu_device, verbose=True):
@@ -224,6 +289,11 @@ def main() -> int:
     ap.add_argument("--cap-max-pixels", type=int, default=None)
     ap.add_argument("--n-samples", type=int, default=None,
                     help="Cap on dataset size (default: use entire data_dir).")
+    ap.add_argument("--use-think-labels", action="store_true", default=None,
+                    help="Use embedded/sidecar think labels during training.")
+    ap.add_argument("--no-use-think-labels", dest="use_think_labels",
+                    action="store_false", default=None,
+                    help="Ignore embedded/sidecar think labels during training.")
     ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--grad-accum", type=int, default=None)
@@ -273,6 +343,24 @@ def main() -> int:
     ap.add_argument("--upstream-lora-path", default=None,
                     help="Bake-in merge an upstream-format LoRA into the bf16 base before training. "
                          "Useful for stacking: train new style on top of the 8-step distill LoRA.")
+    # ---- Official-consistency knobs (report Eq. (5) / Table 2). ----
+    ap.add_argument("--loss-type", default=None,
+                    choices=(None, *VALID_LOSS_TYPES),
+                    help="FM loss objective: x0 (legacy) | v (official) | x0_huber | v_huber.")
+    ap.add_argument("--huber-delta", type=float, default=None,
+                    help="Delta for x0_huber / v_huber.")
+    ap.add_argument("--t-dist", default=None,
+                    choices=(None, "uniform", "logit_normal"),
+                    help="t-sampling distribution. Official: logit_normal (mean=-0.8, std=0.8).")
+    ap.add_argument("--t-logit-mean", type=float, default=None,
+                    help="Mean for logit_normal t-sampling (default: -0.8 per report).")
+    ap.add_argument("--t-logit-std", type=float, default=None,
+                    help="Std for logit_normal t-sampling (default: 0.8 per report).")
+    ap.add_argument("--cond-dropout-text", type=float, default=None,
+                    help="Train-time CFG dropout probability for text-only condition drop. Official: 0.10.")
+    ap.add_argument("--cond-dropout-both", type=float, default=None,
+                    help="Additional unconditional bucket for text+image condition drop. Official: 0.10; "
+                         "pure T2I maps this to the unconditional prompt prefix.")
     args = ap.parse_args()
 
     # ---- Resolve config: load YAML if given, then overlay CLI flags ----
@@ -291,6 +379,7 @@ def main() -> int:
     _override(cfg.data, "cap_max_pixels", args.cap_max_pixels)
     _override(cfg.data, "snap_bucket", args.snap_bucket)
     _override(cfg.data, "n_samples", args.n_samples)
+    _override(cfg.data, "use_think_labels", args.use_think_labels)
     _override(cfg.style, "trigger", args.style_trigger)
     _override(cfg.style, "prompt_template", args.prompt_template)
     _override(cfg.lora, "preset", args.lora_preset)
@@ -310,6 +399,13 @@ def main() -> int:
     _override(cfg.runtime, "device", args.device)
     _override(cfg.runtime, "cpu_device", args.cpu_device)
     _override(cfg.runtime, "upstream_lora_path", args.upstream_lora_path)
+    _override(cfg.train, "loss_type", args.loss_type)
+    _override(cfg.train, "huber_delta", args.huber_delta)
+    _override(cfg.train, "t_dist", args.t_dist)
+    _override(cfg.train, "t_logit_mean", args.t_logit_mean)
+    _override(cfg.train, "t_logit_std", args.t_logit_std)
+    _override(cfg.train, "cond_dropout_text", args.cond_dropout_text)
+    _override(cfg.train, "cond_dropout_both", args.cond_dropout_both)
 
     # `data_dir` is the only truly required field.
     if not cfg.data.data_dir or cfg.data.data_dir == "dataset/my_style":
@@ -339,6 +435,7 @@ def main() -> int:
     a.data_dir = cfg.data.data_dir
     a.cap_max_pixels = cfg.data.cap_max_pixels
     a.n_samples = cfg.data.n_samples
+    a.use_think_labels = cfg.data.use_think_labels
     a.steps = cfg.train.steps
     a.lr = cfg.train.lr
     a.grad_accum = cfg.train.grad_accum
@@ -357,7 +454,28 @@ def main() -> int:
     a.upstream_lora_path = cfg.runtime.upstream_lora_path
     a.lora_specs = cfg.lora.resolved_specs()
     a.unfreeze_patterns = list(cfg.unfreeze)
+    a.loss_type = cfg.train.loss_type
+    a.huber_delta = cfg.train.huber_delta
+    a.t_dist = cfg.train.t_dist
+    a.t_logit_mean = cfg.train.t_logit_mean
+    a.t_logit_std = cfg.train.t_logit_std
+    a.cond_dropout_text = cfg.train.cond_dropout_text
+    a.cond_dropout_both = cfg.train.cond_dropout_both
     args = a  # rebind so the body below uses the resolved config
+
+    if args.loss_type not in VALID_LOSS_TYPES:
+        ap.error(f"loss_type must be one of {VALID_LOSS_TYPES}, got {args.loss_type!r}")
+    if args.t_dist not in ("uniform", "logit_normal"):
+        ap.error(f"t_dist must be 'uniform' or 'logit_normal', got {args.t_dist!r}")
+    if args.cond_dropout_text < 0 or args.cond_dropout_both < 0:
+        ap.error("condition dropout probabilities must be non-negative")
+    if args.cond_dropout_text + args.cond_dropout_both > 1.0:
+        ap.error("cond_dropout_text + cond_dropout_both must be <= 1.0")
+    print(f"[bf16-offload] loss_type={args.loss_type}  t_dist={args.t_dist}"
+          + (f" (mean={args.t_logit_mean}, std={args.t_logit_std})"
+             if args.t_dist == "logit_normal" else ""), flush=True)
+    print(f"[bf16-offload] cond_dropout: text={args.cond_dropout_text:.3f}  "
+          f"both={args.cond_dropout_both:.3f}", flush=True)
 
     torch.manual_seed(args.seed)
 
@@ -389,12 +507,14 @@ def main() -> int:
             _data_path,
             cap_max_pixels=args.cap_max_pixels,
             snap_bucket=args.snap_bucket,
+            use_think_labels=args.use_think_labels,
         )
     else:
         ds = PairedFolderT2IDataset(
             args.data_dir,
             cap_max_pixels=args.cap_max_pixels,
             snap_bucket=args.snap_bucket,
+            use_think_labels=args.use_think_labels,
         )
     n_use = len(ds) if args.n_samples is None else min(args.n_samples, len(ds))
     samples = [ds[i] for i in range(n_use)]
@@ -406,11 +526,17 @@ def main() -> int:
             enforce_batch_one=True,
             prompt_template=args.prompt_template,
             style_trigger=args.style_trigger,
+            t_dist=args.t_dist,
+            t_logit_mean=args.t_logit_mean,
+            t_logit_std=args.t_logit_std,
+            cond_dropout_text=args.cond_dropout_text,
+            cond_dropout_both=args.cond_dropout_both,
         ),
         model=model if args.prompt_template == "official" else None,
     )
     print(f"[bf16-offload] dataset: {len(ds)} pairs (using {n_use})  "
-          f"snap_bucket={args.snap_bucket}  style_trigger={args.style_trigger!r}", flush=True)
+          f"snap_bucket={args.snap_bucket}  use_think_labels={args.use_think_labels}  "
+          f"style_trigger={args.style_trigger!r}", flush=True)
 
     # ---- Optional: bake-in merge an upstream-format LoRA into the base
     # before our wrap, so we train on top of (e.g.) the 8-step distill LoRA. ----
@@ -438,14 +564,21 @@ def main() -> int:
 
     # tower classification
     classify = classify_module_paths(model)
+    legacy_static_scenarios = {"mvp", "mvp_aux", "gen_vision", "aux_no_head"}
+    if args.scenario not in legacy_static_scenarios:
+        try:
+            _guard_static_prefix_unfreeze(args.unfreeze_patterns, classify)
+        except ValueError as e:
+            ap.error(str(e))
     move_param_set(model, classify["unused"], args.cpu_device)
     move_param_set(model, classify["shared"], args.device)
 
     # ---- Phase 1: precompute prefix KVs (ordinary tower briefly on GPU) ----
     prefix_kvs_cpu = precompute_prefix_kvs(
-        model, samples, tok, collator,
+        model, samples, collator,
         cuda_device=args.device, cpu_device=args.cpu_device,
         classify=classify,
+        include_uncond=(args.cond_dropout_text + args.cond_dropout_both) > 0.0,
     )
 
     # ---- Phase 2: ordinary → CPU permanently, gen → GPU permanently ----
@@ -488,9 +621,12 @@ def main() -> int:
 
     # If requested, move all prefix KVs to GPU permanently
     if args.keep_kvs_on_gpu:
-        for kv in prefix_kvs_cpu:
+        for kv in prefix_kvs_cpu["cond"]:
             _cache_to(kv, args.device)
-        print(f"[bf16-offload] all {len(prefix_kvs_cpu)} prefix KVs kept on GPU")
+        if prefix_kvs_cpu["uncond"] is not None:
+            _cache_to(prefix_kvs_cpu["uncond"], args.device)
+        n_prefix_kv = len(prefix_kvs_cpu["cond"]) + (1 if prefix_kvs_cpu["uncond"] is not None else 0)
+        print(f"[bf16-offload] all {n_prefix_kv} prefix KVs kept on GPU")
 
     # ---- Phase 5: optimizer + training loop ----
     wrapper = TrainingWrapper(model)
@@ -520,7 +656,7 @@ def main() -> int:
     print(f"\n[bf16-offload] starting training ({args.steps} steps, n_samples={n_use})", flush=True)
     t0 = time.time()
     losses: list[float] = []
-    loss_tensors_buf: list[torch.Tensor] = []   # deferred .item() — flushed at log boundaries
+    loss_tensors_buf: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
     log_records_buf: list[dict] = []            # paired JSON record per buffered loss
     json_lines_buf: list[str] = []              # serialized JSON awaiting batched file write
     rng = torch.Generator().manual_seed(args.seed)
@@ -587,14 +723,32 @@ def main() -> int:
         sample = samples[idx]
         token_h, token_w = batch["token_hw"]
 
-        # Fetch this sample's pre-computed prefix KV
-        kv = prefix_kvs_cpu[idx]
+        # Fetch this sample's pre-computed prefix KV. Condition dropout uses a
+        # shared unconditional prefix; normal samples use their per-sample cond KV.
+        prefix_key = batch.get("prefix_cache_key", ["cond"])[0]
+        cond_drop_mode = batch.get("cond_drop_mode", ["none"])[0]
+        kv = _select_prefix_kv(prefix_kvs_cpu, idx, prefix_key)
         if not args.keep_kvs_on_gpu:
             _cache_to(kv, args.device)
 
         out = wrapper.forward_t2i_step(batch, prefix_kv=kv)
-        loss = fm_loss_x0(out.x_pred, batch["x0_patch"]) / args.grad_accum
+        # v target for both training and diagnostics. Cheap (one /).
+        v_target = compute_v_target(batch["x0_patch"], out.z_t, batch["t"], t_eps=wrapper.t_eps)
+        loss = fm_loss(
+            loss_type=args.loss_type,
+            x_pred=out.x_pred,
+            x0_patch=batch["x0_patch"],
+            v_pred=out.v_pred,
+            v_target=v_target,
+            huber_delta=args.huber_delta,
+        ) / args.grad_accum
         loss.backward()
+        # Diagnostic: always compute the *other* MSE (no grad) so the log
+        # carries both `x0_mse` and `v_mse` regardless of which one we train.
+        with torch.no_grad():
+            x0_mse_t = fm_loss_x0(out.x_pred, batch["x0_patch"]).detach()
+            v_mse_t = fm_loss_v(out.v_pred, v_target).detach()
+            t_vec = batch["t"].detach()
 
         do_step = ((step + 1) % args.grad_accum) == 0
         if do_step:
@@ -606,19 +760,43 @@ def main() -> int:
 
         # Defer loss.item() (forces GPU→CPU sync) — keep tensor on GPU,
         # call .item() only at log-print boundaries. Tensor list is tiny.
-        loss_tensors_buf.append(loss.detach() * args.grad_accum)  # un-scaled
+        loss_tensors_buf.append((
+            loss.detach() * args.grad_accum,   # un-scaled active loss
+            x0_mse_t, v_mse_t, t_vec,
+        ))
         log_records_buf.append({
             "step": step, "sample_idx": idx, "sample_id": sample.sample_id,
             "token_h": int(token_h), "token_w": int(token_w),
+            "cond_drop_mode": cond_drop_mode,
+            "prefix_cache_key": prefix_key,
         })
 
         is_log_boundary = (step < 5 or step % 10 == 0 or step == args.steps - 1)
         if is_log_boundary:
-            # Sync materialize buffered losses (cheap; PyTorch batches the H2D)
-            new_losses = [t.item() for t in loss_tensors_buf]
+            # Sync materialize buffered losses + diagnostics in one shot.
+            new_losses: list[float] = []
+            new_x0: list[float] = []
+            new_v: list[float] = []
+            new_t_stats: list[tuple[float, float, float, float]] = []
+            for loss_t, x0_t, vt, t_vec_t in loss_tensors_buf:
+                new_losses.append(loss_t.item())
+                new_x0.append(x0_t.item())
+                new_v.append(vt.item())
+                tv = t_vec_t.float()
+                new_t_stats.append((
+                    tv.mean().item(),
+                    tv.std(unbiased=False).item() if tv.numel() > 1 else 0.0,
+                    tv.min().item(),
+                    tv.max().item(),
+                ))
             losses.extend(new_losses)
-            for rec, lv in zip(log_records_buf, new_losses):
+            for rec, lv, x0v, vv, tstat in zip(
+                log_records_buf, new_losses, new_x0, new_v, new_t_stats
+            ):
                 rec["loss"] = lv
+                rec["x0_mse"] = x0v
+                rec["v_mse"] = vv
+                rec["t_mean"], rec["t_std"], rec["t_min"], rec["t_max"] = tstat
                 json_lines_buf.append(json.dumps(rec))
             loss_tensors_buf.clear()
             log_records_buf.clear()
@@ -628,6 +806,8 @@ def main() -> int:
             cur_w = batch['noisy_pixel_values'].shape[3]
             print(
                 f"[bf16-offload] step={step:4d}  loss={losses[-1]:.4f}  "
+                f"x0={new_x0[-1]:.4f}  v={new_v[-1]:.4f}  "
+                f"t̄={new_t_stats[-1][0]:.3f}  "
                 f"sample={sample.sample_id}  hw=({cur_h},{cur_w}) tokens={token_h*token_w}  "
                 f"elapsed={elapsed:.1f}s",
                 flush=True,

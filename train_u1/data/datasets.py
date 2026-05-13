@@ -141,6 +141,7 @@ class PairedFolderT2IDataset(Dataset):
         prompt_template: str | None = None,
         image_extensions: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp"),
         snap_bucket: bool = False,
+        use_think_labels: bool = True,
     ):
         self.folder = Path(folder)
         if not self.folder.is_dir():
@@ -148,6 +149,7 @@ class PairedFolderT2IDataset(Dataset):
         self.cap_max_pixels = cap_max_pixels
         self.prompt_template = prompt_template
         self.snap_bucket = snap_bucket
+        self.use_think_labels = use_think_labels
 
         pairs: list[tuple[Path, Path, str]] = []
         for ext in image_extensions:
@@ -172,11 +174,13 @@ class PairedFolderT2IDataset(Dataset):
         with open(txt_path, encoding="utf-8") as f:
             raw = f.read()
         caption, think_text = parse_caption_and_think(raw)
+        if not self.use_think_labels:
+            think_text = None
         if self.prompt_template:
             caption = self.prompt_template.format(caption=caption)
         # Legacy fallback: `<id>.think.txt` separate sidecar (deprecated;
         # `parse_caption_and_think` is the preferred path).
-        if think_text is None:
+        if self.use_think_labels and think_text is None:
             think_path = img_path.with_suffix(".think.txt")
             if think_path.is_file():
                 with open(think_path, encoding="utf-8") as f:
@@ -257,6 +261,7 @@ class ArrowT2IDataset(Dataset):
         cap_max_pixels: int | None = None,
         prompt_template: str | None = None,
         snap_bucket: bool = False,
+        use_think_labels: bool = True,
     ):
         try:
             import pyarrow.parquet as pq  # noqa: F401
@@ -269,6 +274,7 @@ class ArrowT2IDataset(Dataset):
         self.cap_max_pixels = cap_max_pixels
         self.prompt_template = prompt_template
         self.snap_bucket = snap_bucket
+        self.use_think_labels = use_think_labels
         self._table = None  # lazy-loaded
         self._n: int | None = None
 
@@ -311,6 +317,8 @@ class ArrowT2IDataset(Dataset):
         sample_id = row["sample_id"][0]
         caption = row["caption"][0]
         think = (row.get("think") or [None])[0] or None
+        if not self.use_think_labels:
+            think = None
 
         if "image" in self._table.column_names and row["image"][0] is not None:
             from PIL import Image

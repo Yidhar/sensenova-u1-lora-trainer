@@ -21,8 +21,6 @@ from typing import Iterable
 
 import torch
 
-import math
-
 from train_u1.constants import (
     FM_OUTPUT_DIM,
     NOISE_SCALE_BASE_IMAGE_SEQ_LEN,
@@ -50,7 +48,23 @@ class CollatorConfig:
     # then batch=1).
     image_hw: tuple[int, int] | None = (512, 512)
     t_eps: float = T_EPS_DEFAULT
-    t_dist: str = "uniform"      # uniform on (t_eps, 1] for MVP
+    # **Default = `logit_normal` (mean=-0.8, std=0.8)** to match SenseNova-U1
+    # report Table 2:
+    #   u ~ Normal(t_logit_mean, t_logit_std);  t = sigmoid(u)
+    # clamped to [t_eps, 1 - t_eps]. Biases t toward the *low* end (near-clean);
+    # combined with v-loss this recovers the official training density.
+    # `uniform` on (t_eps, 1] is kept for back-compat / ablation.
+    t_dist: str = "logit_normal"
+    t_logit_mean: float = -0.8
+    t_logit_std: float = 0.8
+    # Classifier-free guidance condition dropout. Keep the collator default at
+    # zero so eval/smoke/diagnostic callers stay fully conditional unless they
+    # opt in. The official training entry point passes 0.10/0.10 from TrainConfig.
+    # For pure T2I training there is no separate reference-image condition, so
+    # `text_image` uses the same unconditional prompt path as `text` while
+    # recording the intended mode.
+    cond_dropout_text: float = 0.0
+    cond_dropout_both: float = 0.0
     add_noise_scale: bool = True
     # Base noise_scale value (config.noise_scale = 1.0). The *effective* per-sample
     # noise_scale is computed at collator runtime as
@@ -80,6 +94,12 @@ class CollatorConfig:
     # Format used: f"{style_trigger}, {original_caption}".
     style_trigger: str = ""
 
+    def __post_init__(self) -> None:
+        if self.cond_dropout_text < 0 or self.cond_dropout_both < 0:
+            raise ValueError("condition dropout probabilities must be non-negative")
+        if self.cond_dropout_text + self.cond_dropout_both > 1.0:
+            raise ValueError("cond_dropout_text + cond_dropout_both must be <= 1.0")
+
 
 class SenseNovaU1Collator:
     """Stateful collator: holds tokenizer + config, callable on a list of `T2ISample`.
@@ -94,6 +114,7 @@ class SenseNovaU1Collator:
         self.tok = tokenizer
         self.cfg = cfg or CollatorConfig()
         self._gen = torch.Generator().manual_seed(self.cfg.seed)
+        self._cond_gen = torch.Generator().manual_seed(self.cfg.seed + 10_003)
         if self.cfg.prompt_template == "official":
             if model is None or not hasattr(model, "_build_t2i_query"):
                 raise ValueError(
@@ -147,9 +168,86 @@ class SenseNovaU1Collator:
         if self.cfg.t_dist == "uniform":
             t = torch.rand(batch_size, generator=self._gen)
             t = t * (1.0 - self.cfg.t_eps) + self.cfg.t_eps
+        elif self.cfg.t_dist == "logit_normal":
+            # u ~ N(mu, sigma)  ->  t = sigmoid(u)  in (0, 1)
+            u = torch.randn(batch_size, generator=self._gen)
+            u = u * self.cfg.t_logit_std + self.cfg.t_logit_mean
+            t = torch.sigmoid(u)
+            t = t.clamp(min=self.cfg.t_eps, max=1.0 - self.cfg.t_eps)
         else:
             raise NotImplementedError(f"t_dist={self.cfg.t_dist}")
         return t
+
+    def _sample_condition_modes(self, batch_size: int) -> list[str]:
+        p_text = float(self.cfg.cond_dropout_text)
+        p_both = float(self.cfg.cond_dropout_both)
+        if p_text == 0.0 and p_both == 0.0:
+            return ["none"] * batch_size
+        u = torch.rand(batch_size, generator=self._cond_gen)
+        modes: list[str] = []
+        for v in u.tolist():
+            if v < p_text:
+                modes.append("text")
+            elif v < p_text + p_both:
+                modes.append("text_image")
+            else:
+                modes.append("none")
+        return modes
+
+    @staticmethod
+    def _prefix_cache_key(mode: str) -> str:
+        if mode == "none":
+            return "cond"
+        if mode in ("text", "text_image"):
+            return "uncond"
+        raise ValueError(f"unknown condition dropout mode {mode!r}")
+
+    def _render_prompts(
+        self,
+        samples: list[T2ISample],
+        condition_modes: list[str],
+    ) -> list[str]:
+        prompts: list[str] = []
+        for s, mode in zip(samples, condition_modes):
+            if mode not in ("none", "text", "text_image"):
+                raise ValueError(f"unknown condition dropout mode {mode!r}")
+            drop_text = mode in ("text", "text_image")
+            if drop_text:
+                raw_prompt = ""
+            elif self.cfg.style_trigger:
+                raw_prompt = f"{self.cfg.style_trigger}, {s.prompt}"
+            else:
+                raw_prompt = s.prompt
+
+            if self._build_t2i_query is not None:
+                if drop_text:
+                    # Match the sampler's unconditional CFG prefix exactly:
+                    # `_build_t2i_query("", append_text="<img>")`.
+                    prompts.append(self._build_t2i_query("", append_text="<img>"))
+                    continue
+                # Per-sample think injection: when the dataset supplies a
+                # `think` text, render it INSIDE the otherwise-empty
+                # `<think></think>` block of the official prompt template.
+                # This makes training distribution match inference-time
+                # `--think-mode`, where the model autoregressively fills the
+                # same window with ~250-400 reasoning tokens. Without this,
+                # the gen tower sees an unfamiliar prefix length/content
+                # at inference and the LoRA delta is calibrated against
+                # the wrong cond-KV distribution.
+                if s.think:
+                    append_text = f"<think>\n{s.think}\n</think>\n\n<img>"
+                else:
+                    append_text = self._gen_append
+                prompts.append(
+                    self._build_t2i_query(
+                        raw_prompt,
+                        system_message=self._sys_msg_for_gen,
+                        append_text=append_text,
+                    )
+                )
+            else:
+                prompts.append(" " if drop_text else raw_prompt)
+        return prompts
 
     @staticmethod
     def _check_image_hw(image_hw: tuple[int, int]) -> None:
@@ -163,7 +261,12 @@ class SenseNovaU1Collator:
     # ------------------------------------------------------------------ #
     # Main entry                                                          #
     # ------------------------------------------------------------------ #
-    def __call__(self, samples: list[T2ISample]) -> dict[str, torch.Tensor]:
+    def __call__(
+        self,
+        samples: list[T2ISample],
+        *,
+        condition_modes: list[str] | None = None,
+    ) -> dict[str, torch.Tensor]:
         cfg = self.cfg
         if cfg.enforce_batch_one and len(samples) != 1:
             raise ValueError(
@@ -196,38 +299,16 @@ class SenseNovaU1Collator:
         # 1) text → ids + per-sample lengths. With enforce_batch_one we know
         #    `len(samples) == 1` so no batch padding is applied — `L_text` is
         #    exactly this prompt's length (matches upstream `_build_t2i_text_inputs`).
-        # Apply style trigger BEFORE chat-template wrap so the trigger lives
-        # inside the user-message portion of the chat (not in system or
-        # assistant). Identical formatting must be replicated at sample time.
-        if cfg.style_trigger:
-            raw_prompts = [f"{cfg.style_trigger}, {s.prompt}" for s in samples]
+        if condition_modes is None:
+            condition_modes = self._sample_condition_modes(len(samples))
         else:
-            raw_prompts = [s.prompt for s in samples]
-        if self._build_t2i_query is not None:
-            prompts = []
-            for rp, s in zip(raw_prompts, samples):
-                # Per-sample think injection: when the dataset supplies a
-                # `think` text, render it INSIDE the otherwise-empty
-                # `<think></think>` block of the official prompt template.
-                # This makes training distribution match inference-time
-                # `--think-mode`, where the model autoregressively fills the
-                # same window with ~250-400 reasoning tokens. Without this,
-                # the gen tower sees an unfamiliar prefix length/content
-                # at inference and the LoRA delta is calibrated against
-                # the wrong cond-KV distribution.
-                if s.think:
-                    append_text = f"<think>\n{s.think}\n</think>\n\n<img>"
-                else:
-                    append_text = self._gen_append
-                prompts.append(
-                    self._build_t2i_query(
-                        rp,
-                        system_message=self._sys_msg_for_gen,
-                        append_text=append_text,
-                    )
+            condition_modes = list(condition_modes)
+            if len(condition_modes) != len(samples):
+                raise ValueError(
+                    f"condition_modes length {len(condition_modes)} != samples length {len(samples)}"
                 )
-        else:
-            prompts = list(raw_prompts)
+        prompts = self._render_prompts(samples, condition_modes)
+        prefix_cache_keys = [self._prefix_cache_key(m) for m in condition_modes]
         input_ids, text_lens = self._tokenize(prompts)
         B = input_ids.shape[0]
         L_text = input_ids.shape[1]
@@ -298,6 +379,12 @@ class SenseNovaU1Collator:
             "noisy_pixel_values": noisy_pixel_values, # (B, 3, H, W)
             "noisy_grid_hw": noisy_grid_hw,           # (B, 2)
             "noise_scale": noise_scale,               # (B,) or None
+            "cond_drop_text": torch.tensor(
+                [m in ("text", "text_image") for m in condition_modes],
+                dtype=torch.bool,
+            ),
+            "cond_drop_mode": condition_modes,
+            "prefix_cache_key": prefix_cache_keys,
             "sample_ids": [s.sample_id for s in samples],
             "text_lens": text_lens,
             "token_hw": (token_h, token_w),

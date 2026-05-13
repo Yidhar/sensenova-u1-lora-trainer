@@ -15,12 +15,15 @@ A single YAML file describes a complete LoRA training run. Example::
       prompt_template: official        # or 'plain'
 
     lora:
-      preset: default                  # = attn+mlp+fm_head all at r=64,a=64
-      # spec: "attn=r64a64;mlp=r64a64;fm_head=r64a64;mlp_mot_gen.down_proj=off"
+      preset: attn_mlp_no_head         # small-data baseline: LoRA attn+mlp only
+      # spec: "attn=r64a64;mlp=r64a64;mlp_mot_gen.down_proj=off"
       dropout: 0.0
 
     unfreeze:                          # full-finetune (non-LoRA) regex patterns
-      []                               # default: LoRA-only training
+      - '^fm_modules\\.timestep_embedder\\.'
+      - '^fm_modules\\.noise_scale_embedder\\.'
+      - '^fm_modules\\.vision_model_mot_gen\\.'
+      - '^fm_modules\\.fm_head\\.'
 
     train:
       steps: 6000
@@ -29,6 +32,10 @@ A single YAML file describes a complete LoRA training run. Example::
       shuffle: true
       grad_accum: 1
       checkpoint_every: 600
+      loss_type: x0
+      t_dist: uniform
+      cond_dropout_text: 0.0
+      cond_dropout_both: 0.0
 
     runtime:
       keep_kvs_on_gpu: true
@@ -68,6 +75,7 @@ class DataConfig:
     snap_bucket: bool = True
     n_samples: int | None = None  # default: use entire dataset
     sample_buckets_file: str | None = None
+    use_think_labels: bool = False
 
 
 @dataclass
@@ -78,7 +86,7 @@ class StyleConfig:
 
 @dataclass
 class LoRAConfig:
-    preset: str | None = "default"   # one of LORA_PRESETS
+    preset: str | None = "attn_mlp_no_head"   # one of LORA_PRESETS
     spec: str | None = None          # overrides preset if set
     dropout: float = 0.0
 
@@ -107,6 +115,25 @@ class TrainConfig:
     grad_accum: int = 1
     checkpoint_every: int = 600
     checkpoint_dir: str | None = None  # default: artifacts/{run_name}/checkpoints
+    # FM loss objective. Default is the local small-data baseline (`x0`) because
+    # the ablation study showed that official-style v-loss is not a good
+    # small-data style-training default. `v` remains available for explicit
+    # official alignment experiments.
+    # Choose one of `x0` | `v` | `x0_huber` | `v_huber`.
+    loss_type: str = "x0"
+    huber_delta: float = 1.0
+    # FM `t`-sampling distribution. Default is uniform for the same local
+    # baseline reason. `logit_normal` is kept for report-alignment ablations.
+    t_dist: str = "uniform"
+    t_logit_mean: float = -0.8
+    t_logit_std: float = 0.8
+    # CFG / condition dropout. `cond_dropout_text` drops text condition only;
+    # `cond_dropout_both` is the additional unconditional bucket from the
+    # report. In the current pure-T2I trainer there is no separate reference
+    # image condition, so both modes use the sampler's unconditional prompt
+    # prefix while preserving separate log labels.
+    cond_dropout_text: float = 0.0
+    cond_dropout_both: float = 0.0
 
 
 @dataclass
@@ -119,13 +146,22 @@ class RuntimeConfig:
     upstream_lora_skip: tuple[str, ...] = ()
 
 
+def _default_unfreeze_patterns() -> list[str]:
+    return [
+        r"^fm_modules\.timestep_embedder\.",
+        r"^fm_modules\.noise_scale_embedder\.",
+        r"^fm_modules\.vision_model_mot_gen\.",
+        r"^fm_modules\.fm_head\.",
+    ]
+
+
 @dataclass
 class TrainRunConfig:
     run_name: str = "my_run"
     data: DataConfig = field(default_factory=DataConfig)
     style: StyleConfig = field(default_factory=StyleConfig)
     lora: LoRAConfig = field(default_factory=LoRAConfig)
-    unfreeze: list[str] = field(default_factory=list)
+    unfreeze: list[str] = field(default_factory=_default_unfreeze_patterns)
     train: TrainConfig = field(default_factory=TrainConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 

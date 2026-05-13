@@ -94,6 +94,23 @@ def test_paired_folder_dataset_legacy_split(tmp_path: Path) -> None:
     assert s.think == "legacy think text"
 
 
+def test_paired_folder_can_ignore_think_labels(tmp_path: Path) -> None:
+    """Training defaults can keep prefixes short even if sidecar think files exist."""
+    from PIL import Image
+
+    from train_u1.data.datasets import PairedFolderT2IDataset
+
+    img = Image.new("RGB", (64, 64), color=(0, 0, 0))
+    img.save(tmp_path / "ignore_001.jpg")
+    (tmp_path / "ignore_001.txt").write_text("caption\n---think---\nembedded think")
+    (tmp_path / "ignore_001.think.txt").write_text("legacy think")
+
+    ds = PairedFolderT2IDataset(tmp_path, use_think_labels=False)
+    s = ds[0]
+    assert s.prompt == "caption"
+    assert s.think is None
+
+
 def test_arrow_dataset_roundtrip(tmp_path: Path) -> None:
     """ArrowT2IDataset reads back what `dataset_tools pack-arrow` writes."""
     pa = pytest.importorskip("pyarrow")
@@ -122,6 +139,9 @@ def test_arrow_dataset_roundtrip(tmp_path: Path) -> None:
     assert s.prompt == "cap a"
     assert s.think == "think a"
     assert s.image.shape[0] == 3  # CHW
+
+    ds_no_think = ArrowT2IDataset(out, use_think_labels=False)
+    assert ds_no_think[0].think is None
 
 
 def test_think_delimiter_regex_compiled() -> None:

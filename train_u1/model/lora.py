@@ -17,6 +17,16 @@ Wrapped modules supported (per-module rank/alpha/enable independently):
     Patch decoder (×2):
       fm_modules.fm_head.0    fm_modules.fm_head.2
 
+Experimental A3B/MoE target grammar (requires an A3B runtime whose modules
+match the public checkpoint names):
+
+    Generation MoE experts:
+      mlp_mot_gen.experts.*.gate_proj
+      mlp_mot_gen.experts.*.up_proj
+      mlp_mot_gen.experts.*.down_proj
+    Generation MoE router:
+      mlp_mot_gen.gate
+
 The adapter is implemented as `y = base(x) + scaling * lora_up(lora_down(x))`
 with `scaling = alpha / r`. Initial state: `lora_down` kaiming uniform,
 `lora_up` zeros — so the wrapped module starts at exactly the base output.
@@ -50,16 +60,41 @@ import torch.nn as nn
 ATTN_TARGETS = ("q_proj_mot_gen", "k_proj_mot_gen", "v_proj_mot_gen", "o_proj_mot_gen")
 MLP_TARGETS = ("mlp_mot_gen.gate_proj", "mlp_mot_gen.up_proj", "mlp_mot_gen.down_proj")
 FM_HEAD_TARGETS = ("fm_modules.fm_head.0", "fm_modules.fm_head.2")
+GEN_MOE_MLP_TARGETS = (
+    "mlp_mot_gen.experts.*.gate_proj",
+    "mlp_mot_gen.experts.*.up_proj",
+    "mlp_mot_gen.experts.*.down_proj",
+)
+GEN_MOE_ROUTER_TARGETS = ("mlp_mot_gen.gate",)
+GEN_MOE_TARGETS = GEN_MOE_MLP_TARGETS + GEN_MOE_ROUTER_TARGETS
 
-ALL_KNOWN_TARGETS = ATTN_TARGETS + MLP_TARGETS + FM_HEAD_TARGETS
+DENSE_KNOWN_TARGETS = ATTN_TARGETS + MLP_TARGETS + FM_HEAD_TARGETS
+ALL_KNOWN_TARGETS = DENSE_KNOWN_TARGETS + GEN_MOE_TARGETS
 
 # Convenience expansions used by the CLI parser (`attn`, `mlp`, `fm_head`).
 TARGET_GROUPS: dict[str, tuple[str, ...]] = {
     "attn": ATTN_TARGETS,
     "mlp": MLP_TARGETS,
     "fm_head": FM_HEAD_TARGETS,
-    "all": ALL_KNOWN_TARGETS,
+    # A3B generation-side MoE aliases. These are deliberately separate from
+    # `mlp`/`all` so existing 8B configs remain byte-for-byte semantic matches.
+    "gen_moe_mlp": GEN_MOE_MLP_TARGETS,
+    "moe_mlp": GEN_MOE_MLP_TARGETS,
+    "gen_moe_router": GEN_MOE_ROUTER_TARGETS,
+    "moe_router": GEN_MOE_ROUTER_TARGETS,
+    "gen_moe_all": ATTN_TARGETS + GEN_MOE_TARGETS + FM_HEAD_TARGETS,
+    "moe_all": ATTN_TARGETS + GEN_MOE_TARGETS + FM_HEAD_TARGETS,
+    "all": DENSE_KNOWN_TARGETS,
 }
+
+_GEN_MOE_EXPERT_TARGET_RE = re.compile(
+    r"^mlp_mot_gen\.experts\.(?P<expert>\*|\d+)\."
+    r"(?P<leaf>gate_proj|up_proj|down_proj)$"
+)
+
+
+def _is_known_target(target: str) -> bool:
+    return target in ALL_KNOWN_TARGETS or _GEN_MOE_EXPERT_TARGET_RE.match(target) is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -71,7 +106,8 @@ TARGET_GROUPS: dict[str, tuple[str, ...]] = {
 class LoRASpec:
     """Per-target LoRA configuration.
 
-    `target` is one of `ALL_KNOWN_TARGETS` (verbatim module-name suffix).
+    `target` is one of `ALL_KNOWN_TARGETS` (verbatim module-name suffix) or
+    an A3B MoE expert target like `mlp_mot_gen.experts.0.gate_proj`.
     `r` is the LoRA rank. `alpha` is the LoRA alpha; `scaling = alpha / r`.
     `dropout` applies to the input before `lora_down`.
     `enabled=False` lets a preset entry be turned off without removing it.
@@ -84,7 +120,7 @@ class LoRASpec:
     enabled: bool = True
 
     def __post_init__(self) -> None:
-        if self.target not in ALL_KNOWN_TARGETS:
+        if not _is_known_target(self.target):
             raise ValueError(
                 f"unknown LoRA target {self.target!r}. "
                 f"valid: {ALL_KNOWN_TARGETS} or groups {list(TARGET_GROUPS)}"
@@ -219,6 +255,50 @@ def _walk_mlp_targets(model: nn.Module, target_name: str):
         yield sub, leaf, idx
 
 
+def _walk_moe_mlp_targets(model: nn.Module, target_name: str):
+    """Yield generation-side MoE expert projections for A3B-style modules.
+
+    `target_name` is `mlp_mot_gen.experts.*.gate_proj` or a single expert
+    target such as `mlp_mot_gen.experts.7.down_proj`. The walker is intentionally
+    shape/runtime agnostic: if the loaded model has no `experts` ModuleList, it
+    yields nothing so 8B dense configs are unaffected.
+    """
+    m = _GEN_MOE_EXPERT_TARGET_RE.match(target_name)
+    if m is None:
+        raise ValueError(f"invalid MoE expert target {target_name!r}")
+    expert_selector = m.group("expert")
+    leaf = m.group("leaf")
+
+    layers = model.language_model.model.layers
+    for layer_idx, layer in enumerate(layers):
+        sub = getattr(layer, "mlp_mot_gen", None)
+        experts = getattr(sub, "experts", None)
+        if experts is None:
+            continue
+        if expert_selector == "*":
+            expert_indices = range(len(experts))
+        else:
+            expert_idx = int(expert_selector)
+            if expert_idx >= len(experts):
+                continue
+            expert_indices = (expert_idx,)
+        for expert_idx in expert_indices:
+            expert = experts[expert_idx]
+            if hasattr(expert, leaf):
+                yield expert, leaf, layer_idx
+
+
+def _walk_moe_router_targets(model: nn.Module, target_name: str):
+    """Yield generation-side MoE router gates (`mlp_mot_gen.gate`) per layer."""
+    if target_name != "mlp_mot_gen.gate":
+        raise ValueError(f"invalid MoE router target {target_name!r}")
+    layers = model.language_model.model.layers
+    for idx, layer in enumerate(layers):
+        sub = getattr(layer, "mlp_mot_gen", None)
+        if sub is not None and hasattr(sub, "gate"):
+            yield sub, "gate", idx
+
+
 def _walk_fm_head_targets(model: nn.Module, target_name: str):
     """Yield `(parent, attr, idx)` for each fm_head linear matching target_name.
 
@@ -251,6 +331,10 @@ def _resolve_target_walker(target: str):
         return _walk_attn_targets
     if target in MLP_TARGETS:
         return _walk_mlp_targets
+    if _GEN_MOE_EXPERT_TARGET_RE.match(target):
+        return _walk_moe_mlp_targets
+    if target in GEN_MOE_ROUTER_TARGETS:
+        return _walk_moe_router_targets
     if target in FM_HEAD_TARGETS:
         return _walk_fm_head_targets
     raise ValueError(f"no walker for target {target!r}")
@@ -327,10 +411,7 @@ def apply_lora_specs(
 # --------------------------------------------------------------------------- #
 
 
-_SPEC_TOK_RE = re.compile(
-    r"^(?P<target>[A-Za-z0-9_.]+)"
-    r"(?:=(?P<body>.+))?$"
-)
+_SPEC_TOK_RE = re.compile(r"^(?P<target>[A-Za-z0-9_.*]+)(?:=(?P<body>.+))?$")
 _RA_RE = re.compile(r"^r(?P<r>\d+)(?:a(?P<alpha>\d+(?:\.\d+)?))?$")
 
 
@@ -343,14 +424,16 @@ def parse_lora_spec_str(s: str) -> list[LoRASpec]:
         - `off`      disable a target (overrides earlier entries)
         - `r=N,a=M`  alternative comma form (more readable)
 
-    Group expansions: `attn`, `mlp`, `fm_head`, `all` expand to their member
-    targets, all sharing the same body.
+    Group expansions: `attn`, `mlp`, `fm_head`, `gen_moe_mlp`,
+    `gen_moe_router`, `gen_moe_all`, `all` expand to their member targets,
+    all sharing the same body.
 
     Examples::
 
         attn=r64a64;mlp=r64a64
         q_proj_mot_gen=r128a128; k_proj_mot_gen=r128a128
         all=r64a64; mlp_mot_gen.down_proj=off
+        gen_moe_mlp=r8a8; gen_moe_router=r4a4
         fm_head=r=128,a=128
     """
     specs: dict[str, LoRASpec] = {}
@@ -366,7 +449,7 @@ def parse_lora_spec_str(s: str) -> list[LoRASpec]:
 
         targets = TARGET_GROUPS.get(target, (target,))
         for t in targets:
-            if t not in ALL_KNOWN_TARGETS:
+            if not _is_known_target(t):
                 raise ValueError(
                     f"unknown LoRA target {t!r}. "
                     f"valid: {ALL_KNOWN_TARGETS} or groups {list(TARGET_GROUPS)}"
@@ -434,8 +517,22 @@ LORA_PRESETS: dict[str, str] = {
     # Attn + MLP only (no fm_head); equivalent to our pre-v16c v15a recipe.
     "attn_mlp": "attn=r64a64;mlp=r64a64",
 
+    # **Safe presets** that explicitly drop fm_head from the trained surface.
+    # The technical report's grid-artifact discussion attributes artifacts to
+    # the final FFN + MLP head independently modelling disjoint 32×32 patches,
+    # and notes that the official T2I RL stage freezes the generation-branch
+    # MLP head and the last three transformer layers for exactly this reason.
+    # Use these when you want to avoid touching the head at all.
+    "attn_only_no_head": "attn=r64a64",
+    "attn_mlp_no_head": "attn=r64a64;mlp=r64a64",
+
     # Exact upstream 8-step distill LoRA shape (rank 128 alpha 128).
     "official_r128": "attn=r128a128;mlp=r128a128;fm_head=r128a128",
+
+    # Experimental A3B/MoE coverage. Small ranks are intentional: covering all
+    # 48 layers × 32 gen experts × 3 projections gets large quickly.
+    "a3b_moe_r8": "attn=r8a8;gen_moe_mlp=r8a8;fm_head=r8a8",
+    "a3b_moe_router_r8": "gen_moe_router=r8a8",
 }
 
 

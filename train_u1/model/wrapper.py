@@ -17,7 +17,7 @@ References (commit df86ca90):
 - modeling_qwen3.py L152-164, L739-1001
 
 公开证据显示 — every step references public source.
-合理推断 — only the `MSE(x_pred, x0)` loss head, per report §0.1 (5).
+合理推断 — only the `MSE(x_pred, x0)` loss head, per report Eq. (5).
 """
 from __future__ import annotations
 

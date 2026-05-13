@@ -25,15 +25,25 @@ on the train dataset at 2048².
 - **Config-first**: every run is one YAML file (`configs/default.yaml`).
 - **Per-module rank + enable**: each LoRA target (`q_proj_mot_gen`, `mlp_mot_gen.down_proj`,
   `fm_modules.fm_head.0`, …) takes its own rank / alpha / on-off independently.
-- **Default = official coverage at rank 64**: the same 296 module wraps as
-  upstream's 8-step distill LoRA (168 attn + 126 mlp + 2 fm_head), but at
-  rank 64 instead of 128 — half the trainable params, half the on-disk size,
-  retains full module surface.
+- **Experimental MoE target grammar**: A3B-style generation experts can be
+  addressed explicitly (`gen_moe_mlp`, `gen_moe_router`,
+  `mlp_mot_gen.experts.*.gate_proj`) without changing the stable 8B main path.
+- **Default = small-data style baseline**: `configs/default.yaml` uses
+  `x0 + uniform t + no condition dropout`, short captions, LoRA on attn+mlp,
+  and full fine-tuning of the timestep/noise embedders, gen vision bridge, and
+  fm_head.
+- **Official-alignment recipe is optional**: `configs/official_alignment.yaml`
+  keeps the public report knobs together for research ablations, but it is not
+  the safest first run for small style datasets.
 - **Upstream-format save**: load straight into `examples/t2i/inference.py`
   via `--lora_path`, or stack with the official 8-step LoRA.
 - **bf16 training, not 4/8-bit**. Earlier 4-bit nf4 LoRA training produced
   grid artefacts and limb collapse on the gen tower; switching the base to
   bf16 (with offload + static prefix-KV cache) eliminated both.
+
+See the ablation write-up with training curves and sample grids:
+[`docs/small_data_style_ablation.html`](docs/small_data_style_ablation.html)
+or [`docs/small_data_style_ablation.pdf`](docs/small_data_style_ablation.pdf).
 
 ---
 
@@ -47,6 +57,29 @@ on the train dataset at 2048².
 
 `bitsandbytes>=0.45` and `torch>=2.9` must be linked against your CUDA
 runtime. On RTX 5090 (sm_120) you'll likely need the cu128 torch wheel.
+
+### A3B / MoE Status
+
+The trainer now has experimental target grammar for future
+`SenseNova-U1-A3B-MoT` generation-side MoE LoRA work:
+
+```yaml
+lora:
+  spec: "attn=r8a8;gen_moe_mlp=r8a8;gen_moe_router=r8a8"
+```
+
+This is a compatibility layer, not the main training path and not an end-to-end
+A3B training claim. The stable release target remains `SenseNova-U1-8B-MoT`;
+A3B training depends on public MoE runtime support that can instantiate the
+`mlp_mot_gen.experts.*` modules.
+
+Before training, estimate MoE LoRA size from metadata only:
+
+```bash
+python -m train_u1.scripts.inspect_lora_targets \
+    --model path/to/A3B/config.json \
+    --spec "attn=r8a8;gen_moe_mlp=r8a8;fm_head=r8a8"
+```
 
 ---
 
@@ -85,10 +118,10 @@ HF_HOME=$PWD/hf_cache python -m train_u1.scripts.install_modeling_into_snapshot 
    └── …           └── …
    ```
 
-   Each `.txt` is a single-paragraph natural-language caption. Embed the
-   artist credit / style anchor inside the description naturally — don't
-   rely on a hard-coded trigger prepend (`style.trigger` in the YAML is
-   for backward compat only; the v18 recipe uses an empty trigger).
+   Each `.txt` is a single-paragraph natural-language caption. Put the style
+   or artist anchor in a stable way and keep `style.trigger` aligned with how
+   you will sample later. The default config prepends that trigger to every
+   caption.
 
    **Optional**: append a `<think>...</think>` reasoning label inside the
    same `.txt` after a `---think---` delimiter line:
@@ -101,12 +134,11 @@ HF_HOME=$PWD/hf_cache python -m train_u1.scripts.install_modeling_into_snapshot 
    6. **Explicit Prompt:** ...
    ```
 
-   When present, the trainer renders this into the prompt template's
-   `<think>` window so train-time distribution matches inference
-   `--think-mode` (avoids prefix-distribution shift on long autoregressive
-   think). For batch generation of think labels see Agent B's prompt in
-   the v18 commit history; or write them yourself in the upstream
-   6-section format.
+   Think labels are **ignored by default** because low-quality or highly
+   templated think text can dominate the prefix and hurt style binding. To use
+   them, set `data.use_think_labels: true` and evaluate with the same think
+   distribution at sample time. Do this only when your think labels are
+   curated and repeatable.
 
    **Parquet/arrow shards** (recommended for ≥ ~10k images, e.g. 1M
    scaling):
@@ -192,6 +224,7 @@ data:
   data_dir: dataset/my_style
   cap_max_pixels: 4194304          # 2048² hard cap per image
   snap_bucket: true                 # snap to upstream bucket grid
+  use_think_labels: false           # keep prefixes short by default
   # n_samples: 56                   # cap dataset size; default = use everything
 
 style:
@@ -199,13 +232,15 @@ style:
   prompt_template: official        # 'official' (recommended) | 'plain'
 
 lora:
-  preset: default                  # = attn+mlp+fm_head, all r=64 a=64
-  # spec: "attn=r64a64;mlp=r64a64;mlp_mot_gen.down_proj=off;fm_head=r128a128"
+  preset: attn_mlp_no_head         # attn+mlp LoRA; fm_head is full-FT below
+  # spec: "attn=r64a64;mlp=r64a64;mlp_mot_gen.down_proj=off"
   dropout: 0.0
 
 unfreeze:                          # full-FT (non-LoRA) regex patterns
   - '^fm_modules\.timestep_embedder\.'
   - '^fm_modules\.noise_scale_embedder\.'
+  - '^fm_modules\.vision_model_mot_gen\.'
+  - '^fm_modules\.fm_head\.'
 
 train:
   steps: 6000
@@ -214,6 +249,15 @@ train:
   shuffle: true
   grad_accum: 1
   checkpoint_every: 600
+  # Small-data style baseline. See docs/small_data_style_ablation.html before
+  # switching to the official-alignment recipe.
+  loss_type: x0
+  t_dist: uniform
+  t_logit_mean: -0.8
+  t_logit_std: 0.8
+  # huber_delta: 1.0             # only used for *_huber
+  cond_dropout_text: 0.0
+  cond_dropout_both: 0.0
 
 runtime:
   keep_kvs_on_gpu: true
@@ -259,30 +303,41 @@ q_proj_mot_gen=r=128,a=64;k_proj_mot_gen=r=64,a=64  # asymmetric ranks
 
 | Preset | Coverage | Trainable LoRA params | Use when |
 |---|---|---|---|
-| `default` | 168 attn + 126 mlp + 2 fm_head, all r=64 | ~75 M | first try / production |
+| `default` | 168 attn + 126 mlp + 2 fm_head, all r=64 | ~75 M | match upstream 8-step LoRA coverage |
 | `attn_only` | 168 attn, r=64 | ~50 M | ablation |
 | `attn_mlp` | attn + mlp (no fm_head), r=64 | ~75 M | when fm_head is full-FT'd separately |
+| `attn_only_no_head` | alias for `attn_only`; explicit no-fm_head intent | ~50 M | conservative small-data style training |
+| `attn_mlp_no_head` | alias for `attn_mlp`; explicit no-fm_head intent | ~75 M | conservative small-data style training |
 | `official_r128` | exact upstream shape (r=128 across all 296 wraps) | ~298 M | parameter-matching upstream's 8-step LoRA |
+
+The shipped `configs/default.yaml` uses `attn_mlp_no_head` and full-FTs
+`fm_head` separately because that was the most stable small-data baseline in
+our ablations. The `default` preset name inside the LoRA parser still means
+"match upstream 8-step LoRA coverage"; use it only when that exact module
+coverage is what you want. For report-alignment research, start from
+`configs/official_alignment.yaml`.
 
 ---
 
 ## Stack with the official 8-step distill LoRA
 
 Upstream released a step-distillation LoRA that brings inference down to 8
-NFE at `cfg_scale=1.0`. You can train your own style LoRA **on top** of it.
+NFE at `cfg_scale=1.0`. You can train your own style LoRA **on top** of it
+by setting `runtime.upstream_lora_path` in your YAML — at training time we
+bake-in the official 8-step delta into the bf16 base (skipping `fm_head` so
+we don't clobber our own fm_head LoRA), then wrap our LoRA on top.
 
 ```yaml
-# configs/stack_8step.yaml (already in this repo)
 runtime:
   upstream_lora_path: hf_cache/.../SenseNova-U1-8B-MoT-LoRA-8step-V1.0.safetensors
   upstream_lora_skip: ['fm_modules.fm_head']   # don't clobber our fm_head LoRA
 ```
 
-At sample time, also pass the same upstream LoRA:
+At sample time, pass the same upstream LoRA and use 8 steps at cfg=1.0:
 
 ```bash
-./sample.sh configs/stack_8step.yaml \
-    artifacts/my_style_8step/trainable_state.safetensors \
+./sample.sh configs/my_style.yaml \
+    artifacts/my_style/trainable_state.safetensors \
     --prompt "…" \
     --upstream-lora-path SenseNova-U1-8B-MoT-LoRA-8step-V1.0.safetensors \
     --upstream-lora-skip fm_modules.fm_head \
@@ -302,9 +357,8 @@ At sample time, also pass the same upstream LoRA:
 ├── pyproject.toml                 # package metadata
 ├── LICENSE                        # Apache-2.0
 ├── configs/
-│   ├── default.yaml               # opinionated starting point
-│   ├── v16c.yaml                  # production recipe (LoRA + ts/ns/vision/fm_head full-FT)
-│   └── stack_8step.yaml           # train on top of 8-step distill LoRA
+│   ├── default.yaml               # recommended small-data style baseline
+│   └── official_alignment.yaml    # optional report-alignment research config
 ├── train_u1/                      # importable package
 │   ├── config.py                  # YAML config schema
 │   ├── constants.py               # pinned MODEL_SHA / CODE_COMMIT / arch constants
@@ -314,7 +368,7 @@ At sample time, also pass the same upstream LoRA:
 │   │   ├── lora_io.py             # save/load + upstream merge
 │   │   ├── loader.py              # bf16 base load + tower offload
 │   │   ├── wrapper.py             # forward_t2i_step
-│   │   ├── losses.py              # fm_loss_x0
+│   │   ├── losses.py              # fm_loss_x0 / fm_loss_v / fm_loss dispatcher
 │   │   ├── patching.py            # patchify/unpatchify
 │   │   └── …
 │   ├── scripts/
@@ -325,7 +379,10 @@ At sample time, also pass the same upstream LoRA:
 │   │   └── install_modeling_into_snapshot.py
 │   └── tests/
 ├── docs/
-│   └── SETUP.md                   # data layout, design rationale, pinned-upstream details
+│   ├── SETUP.md                   # data layout, design rationale, pinned-upstream details
+│   ├── small_data_style_ablation.html
+│   ├── small_data_style_ablation.pdf
+│   └── assets/                    # figures used by the ablation document
 ├── artifacts/                     # local-only: checkpoints + sweeps (gitignored)
 ├── dataset/                       # local-only: image+caption pairs (gitignored)
 ├── hf_cache/                      # local-only: HF snapshot (gitignored)

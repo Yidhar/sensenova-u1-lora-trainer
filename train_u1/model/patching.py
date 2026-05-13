@@ -96,7 +96,7 @@ def linear_z_t(x0_patch: torch.Tensor, eps: torch.Tensor, t: torch.Tensor) -> to
     """Linear-flow interpolation `z_t = t * x0 + (1 - t) * eps`.
 
     合理推断 — `_t2i_predict_v` divides `(x_pred - z_t) / (1 - t)` to recover
-    velocity, which is the standard linear-flow form. See report §0.1 (5).
+    velocity, which is the standard linear-flow form. See report Eq. (5).
     Shapes:
         x0_patch : (B, N, FM_OUTPUT_DIM)
         eps      : same as x0_patch

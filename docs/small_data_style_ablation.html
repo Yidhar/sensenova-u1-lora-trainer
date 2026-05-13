@@ -1,0 +1,941 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>对 SenseNova-U1 官方训练配置在小数据风格 LoRA 场景的消融研究</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 22mm 18mm 22mm 18mm;
+    }
+    :root {
+      --ink: #1a1a1a;
+      --muted: #555;
+      --line: #c8c8c8;
+      --rule: #2a2a2a;
+      --soft: #f6f6f4;
+      --accent: #6b3410;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Source Han Serif SC", "Noto Serif CJK SC", "STSong",
+                   "Latin Modern Roman", "Linux Libertine O", "Times New Roman", Georgia, serif;
+      font-size: 10.5pt;
+      line-height: 1.55;
+      background: white;
+      text-align: justify;
+      hyphens: auto;
+    }
+    h1, h2, h3, h4 {
+      font-family: "Source Han Sans SC", "Noto Sans CJK SC",
+                   "Latin Modern Sans", "Helvetica Neue", Arial, sans-serif;
+      font-weight: 700;
+      line-height: 1.25;
+      page-break-after: avoid;
+      color: var(--ink);
+    }
+    h1 {
+      font-size: 19pt;
+      margin: 0 0 6pt;
+      text-align: center;
+      letter-spacing: 0.5pt;
+    }
+    h2 {
+      font-size: 13pt;
+      margin: 24pt 0 8pt;
+      padding-bottom: 4pt;
+      border-bottom: 0.7pt solid var(--rule);
+    }
+    h3 {
+      font-size: 11pt;
+      margin: 14pt 0 4pt;
+    }
+    h4 {
+      font-size: 10pt;
+      margin: 10pt 0 3pt;
+      font-style: italic;
+      font-weight: 600;
+    }
+    p { margin: 5pt 0; text-indent: 2em; }
+    p.noindent, h1 + p, h2 + p, h3 + p, h4 + p,
+    .abstract p, .figure p, .table-wrap p, .equation,
+    li > p, .meta { text-indent: 0; }
+    .meta {
+      text-align: center;
+      color: var(--muted);
+      font-size: 10pt;
+      margin: 0 0 14pt;
+    }
+    .affil {
+      text-align: center;
+      color: var(--muted);
+      font-size: 9.5pt;
+      margin: 0 0 18pt;
+    }
+    .abstract {
+      margin: 4pt 8% 18pt;
+      padding: 10pt 14pt;
+      border: 0.5pt solid var(--line);
+      background: var(--soft);
+    }
+    .abstract h3 {
+      margin: 0 0 4pt;
+      text-align: center;
+      font-size: 10.5pt;
+      letter-spacing: 1pt;
+      text-transform: uppercase;
+    }
+    .abstract p { text-indent: 0; margin: 4pt 0; font-size: 10pt; }
+    .keywords {
+      font-size: 9.5pt;
+      margin-top: 8pt;
+    }
+    .keywords strong { letter-spacing: 0.5pt; }
+    code, pre, .mono {
+      font-family: "Latin Modern Mono", "DejaVu Sans Mono", "Consolas", monospace;
+    }
+    code { font-size: 9.5pt; background: #f0f0ec; padding: 0 2pt; border-radius: 2pt; }
+    pre {
+      background: #f4f4f0;
+      color: #1a1a1a;
+      padding: 8pt 10pt;
+      font-size: 9pt;
+      border: 0.5pt solid var(--line);
+      border-radius: 3pt;
+      overflow: hidden;
+      white-space: pre-wrap;
+      page-break-inside: avoid;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 4pt 0 6pt;
+      font-size: 9.5pt;
+      page-break-inside: avoid;
+    }
+    th, td {
+      border-top: 0.5pt solid var(--rule);
+      border-bottom: 0.5pt solid var(--rule);
+      padding: 4pt 6pt;
+      vertical-align: top;
+      text-align: left;
+    }
+    th {
+      background: transparent;
+      font-weight: 600;
+      border-top: 0.8pt solid var(--rule);
+      border-bottom: 0.8pt solid var(--rule);
+    }
+    tbody tr td { border-top: none; }
+    tbody tr:last-child td { border-bottom: 0.8pt solid var(--rule); }
+    table.bordered td, table.bordered th { border: 0.5pt solid var(--line); }
+
+    .figure {
+      page-break-inside: avoid;
+      margin: 10pt 0 12pt;
+    }
+    .figure img {
+      display: block;
+      width: 100%;
+      max-width: 100%;
+      margin: 0 auto;
+      border: 0.5pt solid var(--line);
+      background: white;
+    }
+    .figure.center img { margin: 0 auto; }
+    .figure.narrow img { width: 78%; }
+    .figure.full img { width: 100%; }
+    /* Multi-slice figures: a tall composite split into A4-fitting slices.
+       Each slice is its own atomic page-break-inside-avoid; the caption
+       sits on the last slice. */
+    .figure.sliced {
+      page-break-inside: auto;
+    }
+    .figure.sliced .slice {
+      page-break-inside: avoid;
+      margin: 0 0 4pt;
+    }
+    .figure.sliced .slice img {
+      width: 100%;
+      max-height: 245mm;
+      object-fit: contain;
+    }
+    .figure.sliced.narrow .slice img {
+      width: 65%;
+      margin: 0 auto;
+      display: block;
+    }
+    /* Side-by-side / stacked closeup with row labels */
+    .closeup-row {
+      display: grid;
+      grid-template-columns: 70pt 1fr;
+      align-items: center;
+      gap: 8pt;
+      margin: 0 0 4pt;
+      page-break-inside: avoid;
+    }
+    .closeup-row .label {
+      font-size: 9.5pt;
+      font-family: "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
+      color: var(--ink);
+      text-align: right;
+      padding-right: 4pt;
+    }
+    .closeup-row .label .tag {
+      font-weight: 700;
+      font-size: 11pt;
+      display: block;
+      margin-bottom: 1pt;
+    }
+    .closeup-row .label .sub {
+      color: var(--muted);
+      font-size: 8.5pt;
+    }
+    .closeup-row img {
+      width: 100%;
+      max-height: 70mm;
+      object-fit: cover;
+      object-position: center;
+      border: 0.5pt solid var(--line);
+      display: block;
+    }
+    .closeup-figure {
+      page-break-inside: avoid;
+      margin: 10pt 0 14pt;
+    }
+    .caption {
+      color: var(--ink);
+      font-size: 9pt;
+      margin: 4pt 0 0;
+      line-height: 1.45;
+      text-align: left;
+      text-indent: 0;
+    }
+    .caption strong { font-size: 9pt; letter-spacing: 0.3pt; }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8pt;
+      margin: 8pt 0;
+    }
+    .grid-2 .figure { margin: 0; }
+    .table-wrap { page-break-inside: avoid; margin: 6pt 0 14pt; }
+    .table-title { font-size: 9.5pt; margin: 0 0 4pt; text-indent: 0; }
+    .table-title strong { letter-spacing: 0.3pt; }
+
+    .equation {
+      margin: 8pt 0;
+      text-align: center;
+      font-size: 10.5pt;
+      page-break-inside: avoid;
+    }
+    .eq-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14pt;
+    }
+    .eq-label { font-style: italic; color: var(--muted); font-size: 9.5pt; }
+    /* Static math rendering — no MathJax, works in weasyprint PDF */
+    .m, em.m { font-style: italic; font-family: "Latin Modern Math", "STIX Two Math", "Cambria Math", "Times New Roman", serif; }
+    .m-up { font-style: normal; }
+    .m-cal { font-style: italic; font-family: "Latin Modern Math", "STIX Two Math", "Cambria Math", cursive, serif; }
+    .frac {
+      display: inline-block;
+      vertical-align: -0.35em;
+      text-align: center;
+      font-size: 90%;
+      margin: 0 3pt;
+      line-height: 1.1;
+      white-space: nowrap;
+    }
+    .frac .num,
+    .frac .den {
+      display: block;
+      white-space: nowrap;
+      padding: 0 4pt;
+    }
+    .frac .num { border-bottom: 0.6pt solid var(--ink); padding-bottom: 1pt; }
+    .frac .den { padding-top: 1pt; }
+    sub, sup { line-height: 0; font-size: 75%; }
+    .eq-bracket {
+      font-size: 150%;
+      vertical-align: -0.25em;
+      font-weight: 400;
+    }
+
+    ol.refs { padding-left: 1.2em; font-size: 9.5pt; line-height: 1.5; }
+    ol.refs li { margin: 3pt 0; }
+
+    .page-break { page-break-before: always; }
+    .small { font-size: 9pt; color: var(--muted); }
+    section.body { padding: 0 4pt; }
+
+    /* Column layout for compact paragraphs (not used full-width to keep figures full) */
+    .two-col {
+      column-count: 2;
+      column-gap: 14pt;
+      column-rule: 0.3pt solid var(--line);
+    }
+    .two-col p:first-of-type { margin-top: 0; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>对 SenseNova-U1 官方训练配置在小数据风格 LoRA 场景的消融研究</h1>
+  <p class="meta">
+    内部技术报告 · 2026 年 5 月 · train_u1 工具链
+  </p>
+  <p class="affil">
+    针对 SenseNova-U1-8B-MoT 基模的 LoRA / Partial Fine-tuning 训练器维护团队
+  </p>
+
+  <div class="abstract">
+    <h3>Abstract</h3>
+    <p>
+      SenseNova-U1 公开技术报告披露的 text-to-image 流匹配训练在三个关键算法层
+      上做出特定选择：以速度 (velocity) 为目标的损失函数、logit-normal 时间步采样、
+      以及 condition dropout 形式的无分类器引导校准。在大规模预训练或后训阶段，
+      这些选择共同支撑了模型最终行为。但对小数据风格 LoRA 微调而言，是否应当继承
+      这一组合并未由现有公开文献回答。本文以 56 张 Hayateluc 风格图像与 8B-MoT 基模
+      为受控环境，对三个官方算法层逐一做单变量消融，并与 v18 本地基线 (x<sub>0</sub>-MSE
+      损失、uniform 时间步、零 dropout) 进行对比，同时纳入 prompt 前缀格式作为额外
+      受控变量。所有训练运行 6000 步，并在统一 prompt 集上做多步采样以做视觉评估。
+      结果表明，逐项替换为官方设置后，<strong>训练 loss 不发散，但完整采样图像呈
+      现可观察的图像重建质量劣化</strong>：(i) velocity 损失导致天空与大面积渐变上
+      规则横向条纹 (banding) 与 photoreal 化；(ii) logit-normal 时间步导致大面积平
+      滑色块上高频 speckle 噪点与色阶离散化；(iii) 两者组合时进一步出现远景元素缺
+      失、构图被压缩的结构扭曲 (structural distortion)，已超出 "style drift" 范畴而
+      属重建质量缺陷。condition dropout 是三项中唯一未引入可见劣化的项，反而轻
+      微改善图像结构质量。基于该结论，我们将仓库的发布默认值保持为本地基线，并
+      把官方对齐组合作为可选的 ablation 配置发布，供研究复现使用。
+    </p>
+    <p class="keywords">
+      <strong>Keywords —</strong>
+      流匹配 (flow matching) ·
+      LoRA 微调 ·
+      消融研究 ·
+      classifier-free guidance ·
+      风格迁移 ·
+      SenseNova-U1
+    </p>
+  </div>
+</header>
+
+<section class="body">
+
+<h2>1. 引言</h2>
+<p>
+  SenseNova-U1 公开报告 [1] 在 text-to-image 流匹配训练中采用三个具体的算法层：
+  速度损失 (velocity loss)、logit-normal 时间步采样、以及在条件 prefix 上的 dropout
+  作为 classifier-free guidance (CFG) 的校准信号。这一组合在该报告所对应的大规模
+  数据与多阶段训练管线下是合理且互相支撑的设计选择。
+</p>
+<p>
+  与之相对，在小数据风格 LoRA 微调场景下，训练目标的属性发生了实质变化：训练数据
+  规模通常在 10<sup>1</sup>–10<sup>2</sup> 张量级，目的是从基模注入一个相对集中的
+  视觉风格 fingerprint，而非更新一个完整的世界模型。这种情况下，将官方训练配置整
+  体迁移过来是否仍最优，并不显然。
+</p>
+<p>
+  本文以 SenseNova-U1-8B-MoT 为基模，在 56 张 Hayateluc 风格图像数据上做受控消
+  融。具体贡献为三点：
+</p>
+<p>
+  <strong>(i)</strong> 提出一组单变量消融配置，分别替换官方三个算法层中的一个，并
+  与 v18 本地基线对照，使得每对差异可被归因到单一 lever。
+  <strong>(ii)</strong> 指出 prompt 前缀格式 (训练时 caption 中风格 anchor 的位置)
+  是一个独立而强的混淆变量；在没有控制该变量前，单纯的 lever 替换会得到误导性的视
+  觉差异。
+  <strong>(iii)</strong> 基于训练标量曲线与多步采样视觉评估，识别每个官方 lever
+  引入的具体图像重建质量缺陷：velocity 损失→横纹 + photoreal 化、logit-normal
+  时间步→噪点 + 色阶离散化、两者叠加→结构扭曲。condition dropout 是唯一对小数据
+  风格 LoRA 无损甚至有益的官方算法层。
+</p>
+
+<h2>2. 背景与符号</h2>
+
+<h3>2.1 流匹配训练目标</h3>
+<p>
+  设 <em class="m">x</em><sub>0</sub> 为目标图像 patch，<em class="m">ε</em> 为各向同
+  性高斯噪声，时间步 <em class="m">t</em> ∈ [<em class="m">t</em><sub class="m">ε</sub>,
+  1 − <em class="m">t</em><sub class="m">ε</sub>]。本仓库与上游推理共用如下线性插
+  值约定 (linear-<em class="m">z</em> schedule，<em class="m">t</em> 越接近 1 越接
+  近干净图)：
+</p>
+<div class="equation">
+  <span style="white-space: nowrap;">
+    <em class="m">z</em><sub class="m">t</sub> =
+    <em class="m">t</em>&thinsp;<em class="m">x</em><sub>0</sub> +
+    (1&minus;<em class="m">t</em>)&thinsp;<em class="m">ε</em>,
+  </span>
+  &emsp;&emsp;
+  <span style="white-space: nowrap;">
+    <em class="m">v</em><sup>★</sup> =
+    <span class="frac">
+      <span class="num"><em class="m">x</em><sub>0</sub> &minus; <em class="m">z</em><sub class="m">t</sub></span>
+      <span class="den">1 &minus; <em class="m">t</em></span>
+    </span>.
+  </span>
+  &emsp;<span class="eq-label">(1)</span>
+</div>
+<p>
+  在 x<sub>0</sub>-MSE 损失下，训练目标为
+  <em class="m-cal">L</em><sub class="m">x</sub><sub>0</sub> =
+  𝔼 ‖<em class="m">x</em><sub class="m">θ</sub>(<em class="m">z</em><sub class="m">t</sub>,<em class="m">t</em>)
+  − <em class="m">x</em><sub>0</sub>‖<sup>2</sup>；
+  在 velocity 损失下，<em class="m-cal">L</em><sub class="m">v</sub> = 𝔼
+  ‖<em class="m">v</em><sub class="m">θ</sub>(<em class="m">z</em><sub class="m">t</sub>,<em class="m">t</em>)
+  − <em class="m">v</em><sup>★</sup>‖<sup>2</sup>。代入
+  <em class="m">v</em><sup>★</sup> = (<em class="m">x</em><sub>0</sub> − <em class="m">z</em><sub class="m">t</sub>)/(1 − <em class="m">t</em>)
+  与 <em class="m">v</em><sub class="m">θ</sub> = (<em class="m">x</em><sub class="m">θ</sub> − <em class="m">z</em><sub class="m">t</sub>)/(1 − <em class="m">t</em>)，可得二者关系为
+</p>
+<div class="equation">
+  <span style="white-space: nowrap;">
+    <em class="m-cal">L</em><sub class="m">v</sub> =
+    𝔼<span class="eq-bracket">[</span>&hairsp;
+    <span class="frac">
+      <span class="num">‖<em class="m">x</em><sub class="m">θ</sub> &minus; <em class="m">x</em><sub>0</sub>‖<sup>2</sup></span>
+      <span class="den">(1 &minus; <em class="m">t</em>)<sup>2</sup></span>
+    </span>
+    &hairsp;<span class="eq-bracket">]</span>.
+  </span>
+  &emsp;<span class="eq-label">(2)</span>
+</div>
+<p>
+  即 velocity 损失等价于以 (1 − <em class="m">t</em>)<sup>−2</sup> 重新加权的
+  x<sub>0</sub>-MSE。该权重在 <em class="m">t</em> → 1 (近 clean 端) 发散，因此训
+  练梯度的有效分布严重偏向高 <em class="m">t</em> 区间。
+</p>
+
+<h3>2.2 时间步采样分布</h3>
+<p>
+  uniform 采样取 <em class="m">t</em> ∼ <em class="m-cal">U</em>(<em class="m">t</em><sub class="m">ε</sub>,
+  1 − <em class="m">t</em><sub class="m">ε</sub>)。logit-normal 采样定义为
+  <em class="m">u</em> ∼ <em class="m-cal">N</em>(<em class="m">μ</em>, <em class="m">σ</em><sup>2</sup>),
+  <em class="m">t</em> = <em class="m">σ</em>(<em class="m">u</em>)，其中
+  <em class="m">σ</em> 为 sigmoid。本文 logit-normal 取
+  <em class="m">μ</em> = −0.8, <em class="m">σ</em> = 0.8，对应
+  𝔼[<em class="m">t</em>] ≈ 0.34，将概率质量偏向较低 <em class="m">t</em>
+  (较 noisy 一侧)。
+</p>
+
+<h3>2.3 Condition dropout</h3>
+<p>
+  设每步训练以独立概率 <em class="m">p</em><sub class="m-up">text</sub> 将文本条件
+  替换为空 prompt 对应的 prefix KV；以独立概率 <em class="m">p</em><sub class="m-up">both</sub>
+  走 “text + image” 全部 drop 的分支。在纯 T2I 场景下，这两个 drop 模式都会回退到
+  统一的 unconditional prefix。本文取
+  <em class="m">p</em><sub class="m-up">text</sub> = <em class="m">p</em><sub class="m-up">both</sub> = 0.10，
+  即约 20% 步使用无条件 prefix。
+</p>
+
+<h2>3. 实验配置</h2>
+
+<h3>3.1 数据集与基模</h3>
+<p>
+  训练数据为 56 张 Hayateluc 风格自然语言 caption 配对图像，分布在 7 个 aspect-ratio
+  bucket 上 (最大像素数 ≤ 2048<sup>2</sup>)。基模为 SenseNova-U1-8B-MoT [1]，加载方式为
+  bf16 CPU 驻留 + 静态前缀 KV cache 的低显存 LoRA 训练，单卡 32 GB 峰值约 21 GB。
+</p>
+
+<h3>3.2 可训练面</h3>
+<p>
+  所有实验共享如下可训练面，保证不同运行间差异仅来自表 1 列出的三个 lever。
+  表 2 给出训练面分层；表 3 给出训练超参。
+</p>
+
+<div class="table-wrap">
+  <p class="table-title"><strong>表 2.</strong> 训练面分层。LoRA / partial FT / frozen
+  三类合计 286M 可训练参数。所有运行共享此结构。</p>
+  <table class="bordered">
+    <thead>
+      <tr>
+        <th style="width: 14%;">类别</th>
+        <th>覆盖模块</th>
+        <th style="width: 14%;">参数量</th>
+        <th style="width: 18%;">备注</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>LoRA wrap</strong></td>
+        <td>
+          注意力：<code>q_proj_mot_gen</code>, <code>k_proj_mot_gen</code>,
+          <code>v_proj_mot_gen</code>, <code>o_proj_mot_gen</code>；<br>
+          MLP：<code>mlp_mot_gen.{gate,up,down}_proj</code>
+        </td>
+        <td>~204M</td>
+        <td>共 294 wrap；<em class="m">r</em> = 64, <em class="m">α</em> = 64</td>
+      </tr>
+      <tr>
+        <td><strong>Partial fine-tune</strong></td>
+        <td>
+          <code>fm_modules.timestep_embedder</code>,<br>
+          <code>fm_modules.noise_scale_embedder</code>,<br>
+          <code>fm_modules.vision_model_mot_gen</code>,<br>
+          <code>fm_modules.fm_head</code>
+        </td>
+        <td>~82M</td>
+        <td>仅 <code>fm_modules</code> 子树</td>
+      </tr>
+      <tr>
+        <td><strong>Frozen</strong></td>
+        <td>Understand path 全部模块及其它未列出的所有权重</td>
+        <td>—</td>
+        <td>不更新</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="table-wrap">
+  <p class="table-title"><strong>表 3.</strong> 训练超参。所有运行共享。</p>
+  <table class="bordered">
+    <tbody>
+      <tr>
+        <td style="width: 22%;"><strong>训练步数</strong></td>
+        <td>6000</td>
+        <td style="width: 22%;"><strong>学习率</strong></td>
+        <td>5 × 10<sup>−5</sup></td>
+      </tr>
+      <tr>
+        <td><strong>优化器</strong></td>
+        <td>PagedAdamW8bit</td>
+        <td><strong>Batch size</strong></td>
+        <td>1 (native resolution)</td>
+      </tr>
+      <tr>
+        <td><strong>Gradient accumulation</strong></td>
+        <td>1</td>
+        <td><strong>Seed</strong></td>
+        <td>固定 (cross-run)</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<h3>3.3 受控变量</h3>
+<p>
+  本文设五组运行做单变量消融，其中四组训练运行共享数据与可训练面 (表 1)。
+</p>
+
+<div class="table-wrap">
+  <p class="table-title"><strong>表 1.</strong> 五组消融运行的算法配置。<em>baseline</em>
+  Baseline 为本仓库默认；运行 (a)–(d) 对应官方算法层逐项与全部替换。</p>
+  <table>
+    <thead>
+      <tr>
+        <th>运行</th>
+        <th><em class="m-cal">L</em></th>
+        <th><em class="m">t</em> 分布</th>
+        <th><em class="m">p</em><sub class="m-up">text</sub>, <em class="m">p</em><sub class="m-up">both</sub></th>
+        <th>训练 prefix 注释</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>v18 baseline</strong></td><td>x<sub>0</sub></td><td>uniform</td><td>0, 0</td><td>含 think sidecar 长前缀</td></tr>
+      <tr><td>(a) +velocity loss</td><td><strong>v</strong></td><td>uniform</td><td>0, 0</td><td>含 think sidecar 长前缀</td></tr>
+      <tr><td>(b) +logit-normal <em class="m">t</em></td><td>x<sub>0</sub></td><td><strong>logit-normal</strong></td><td>0, 0</td><td>含 think sidecar 长前缀</td></tr>
+      <tr><td>(c) +cond. dropout</td><td>x<sub>0</sub></td><td>uniform</td><td><strong>0.10, 0.10</strong></td><td>含 think sidecar 长前缀</td></tr>
+      <tr><td>(d) full official (a + b + c)</td><td><strong>v</strong></td><td><strong>logit-normal</strong></td><td><strong>0.10, 0.10</strong></td><td>含 think sidecar 长前缀</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h3>3.4 评估协议</h3>
+<p>
+  训练时记录每步 active loss、x<sub>0</sub>-MSE、v-MSE、<em class="m">t</em> 统计量、
+  以及 dropout 路由计数；121-step 滑动平均后绘制。采样评估使用一组固定的 12 条
+  自然风景 prompts，在统一的 7 个 bucket 分辨率下做 50 步 Euler、
+  <em class="m-up">cfg_scale</em> = 4.0、<em class="m-up">timestep_shift</em> = 3.0。
+  我们额外引入 prompt 前缀格式变量：v1 prompts 保留与 baseline 训练分布一致的
+  简短前缀；v2 prompts 在每条句首嵌入 artist anchor，与含 think sidecar 的训练
+  caption 分布对齐。
+</p>
+
+<h2>4. 训练动力学结果</h2>
+
+<p>
+  图 1–3 给出 x0-MSE、active loss 与 v-MSE 三条标量曲线。x0-MSE 是唯一可跨损
+  失类型公平比较的指标：它是所有运行共同执行的诊断量。可见运行 (b) 与 (d) 在
+  x<sub>0</sub>-MSE 上系统性高于 Baseline，差距贯穿整个训练，并非过
+  渡期偏差。
+</p>
+
+<div class="figure">
+  <img src="assets/small_data_style_ablation/tb_x0_mse_curves.png" alt="x0 MSE curves">
+  <p class="caption">
+    <strong>图 1.</strong>&nbsp; x<sub>0</sub>-MSE 在五组运行中的演化 (121-step 滑动平均)。
+    (b) 与 (d) 系统性偏高，表明把 <em class="m">t</em> 密度搬向较 noisy 区间会降低
+    模型在更清晰图像状态下学习颜色与构图的机会。
+  </p>
+</div>
+
+<div class="figure">
+  <img src="assets/small_data_style_ablation/tb_active_loss_curves.png" alt="active loss curves">
+  <p class="caption">
+    <strong>图 2.</strong>&nbsp; active loss 的绝对值不可跨目标比较 (velocity 损失与
+    x<sub>0</sub>-MSE 单位不同)。该图仅用于检查每组运行内部是否存在有效下降趋势，
+    所有运行均下降稳定，未出现训练发散。
+  </p>
+</div>
+
+<div class="figure">
+  <img src="assets/small_data_style_ablation/tb_v_mse_curves.png" alt="v MSE curves">
+  <p class="caption">
+    <strong>图 3.</strong>&nbsp; v-MSE 作为诊断量在所有运行中都被计算。可观察到 v-MSE
+    在 <em class="m">t</em> → 1 端出现极端尖峰，与 §2.1 中给出的
+    (1 − <em class="m">t</em>)<sup>−2</sup> 加权一致。在 velocity 训练的运行 (a) 与 (d)
+    中这些尖峰直接进入梯度，被高权重区间支配。
+  </p>
+</div>
+
+<div class="grid-2">
+  <div class="figure">
+    <img src="assets/small_data_style_ablation/tb_t_distribution.png" alt="t distribution">
+    <p class="caption">
+      <strong>图 4.</strong>&nbsp; 实测 <em class="m">t</em> 分布。logit-normal 运行 (b) 与
+      (d) 的经验均值约 0.34，与理论值 <em class="m">σ</em>(−0.8) ≈ 0.31 一致；其余运行
+      约为 0.50。
+    </p>
+  </div>
+  <div class="figure">
+    <img src="assets/small_data_style_ablation/tb_condition_dropout_counts.png" alt="dropout counts">
+    <p class="caption">
+      <strong>图 5.</strong>&nbsp; 含 condition dropout 的运行 (c) 与 (d) 中每步走
+      cond / uncond 分支的累计次数。最终约 21% 步走 unconditional prefix，与设定的
+      <em class="m">p</em><sub class="m-up">text</sub> + <em class="m">p</em><sub class="m-up">both</sub>
+      = 0.20 在大样本统计上吻合。
+    </p>
+  </div>
+</div>
+
+<h2 class="page-break">5. 视觉评估结果</h2>
+
+<p>
+  训练标量只反映单步去噪行为，无法替代从纯噪声开始的多步采样。在固定 seed 与
+  identical sampling 超参下，我们对每组运行生成 12 张 1024–2048 像素级风景图。
+</p>
+
+<h3>5.1 同 prompt 多配方对比</h3>
+
+<p>
+  图 6 为 forest / wildflower meadow / dandelion field 三个最能体现风格 fingerprint
+  的 prompt 在五组运行 (含 Baseline) 下的 contact sheet。关键观察：
+</p>
+<p>
+  <strong>(i)</strong> Baseline 与运行 (c) 在所有三个 prompt 上都保持暖橙地平线、
+  青蓝高空、清晰前景轮廓的视觉指纹。
+  <strong>(ii)</strong> 运行 (a) 在 dandelion field 上系统性向 photoreal 夜景偏移：
+  cyan 天空消失、puffball 密度降低、暖金核被压暗。
+  <strong>(iii)</strong> 运行 (b) 在所有 prompt 上整体 palette 偏冷，紫蓝山失去层
+  次。
+  <strong>(iv)</strong> 运行 (d) 同时承袭 (a) 与 (b) 的劣化，并叠加 composition
+  cropping：dandelion 图中失去远景 forest mass 与天空。
+</p>
+
+<div class="figure sliced">
+  <div class="slice"><img src="assets/small_data_style_ablation/visual_same_prompts_contactsheet_slice1.jpg" alt="visual same-prompt contact sheet (1/3)"></div>
+  <div class="slice"><img src="assets/small_data_style_ablation/visual_same_prompts_contactsheet_slice2.jpg" alt="visual same-prompt contact sheet (2/3)"></div>
+  <div class="slice"><img src="assets/small_data_style_ablation/visual_same_prompts_contactsheet_slice3.jpg" alt="visual same-prompt contact sheet (3/3)">
+    <p class="caption">
+      <strong>图 6.</strong>&nbsp; 同 prompt × 五组运行的 contact sheet (上→中→下三页连读)。
+      每列为一组运行，每行为一条 prompt。列名直接对应表 1 的算法配置差异。
+      风格 fingerprint 由暖金地平线、青蓝高空、painterly 厚笔触三要素共同定义；
+      运行 (a) 与 (d) 出现 atmospheric drift，运行 (b) 出现 palette 偏冷。
+    </p>
+  </div>
+</div>
+
+<h3>5.2 局部细节：图像重建质量劣化</h3>
+
+<p>
+  §5.1 给出的是整图尺度上 palette / brushwork / 构图层面的偏移。但在原始
+  分辨率下查看局部，三个 v19 系列方案相比 v18 baseline 还呈现三类<strong>图像
+  重建质量</strong>层面的劣化，且每一类都与具体 lever 的训练分布偏置直接挂钩：
+</p>
+<ul>
+  <li><strong>横纹 (banding)：</strong>云形或色温过渡上出现规则横向条纹，主要见于
+      运行 (a) 与 (d)，与 velocity 损失的高 <em class="m">t</em> 加权 (§6.1) 一致。</li>
+  <li><strong>噪点 (speckle noise)：</strong>大面积渐变上出现非自然色阶离散化、
+      细粒度高频纹理，主要见于运行 (b) 与 (d)，与 logit-normal 时间步的低
+      <em class="m">t</em> 偏置 (§6.2) 一致。</li>
+  <li><strong>结构扭曲 (structural distortion)：</strong>远景元素 (forest mass、
+      cloud column) 缺失或被压平、构图整体被裁切，集中见于运行 (d)，是
+      上述两个分布偏置叠加效应。</li>
+</ul>
+<p>
+  以下分别从三个 prompt 截取细节区域 (图 7、图 8、图 9)。每图以 v18 baseline 在最
+  上，按 (a) (b) (d) 顺序向下排列。
+</p>
+
+<h4>5.2.1 Sample 00 森林暗部：竖向 striation 格纹 (运行 (d) 主)</h4>
+<p>
+  Sample 00 (dense old-growth forest interior at dawn) 的画面左下、左侧粗树干、
+  右侧暗部都是低光强、低 SNR 区域，是 v-loss + logit-normal 组合下竖向格纹伪
+  影最先暴露的位置。运行 (d) 的左侧粗树干表面与右下苔藓层均出现可见的等间距
+  竖线。
+</p>
+
+<div class="closeup-figure">
+  <div class="closeup-row">
+    <div class="label"><span class="tag">v18</span><span class="sub">baseline</span></div>
+    <img src="assets/small_data_style_ablation/detail00_v18.jpg" alt="v18 forest bottom">
+  </div>
+  <div class="closeup-row">
+    <div class="label"><span class="tag">(a)</span><span class="sub">+v-loss</span></div>
+    <img src="assets/small_data_style_ablation/detail00_v19a.jpg" alt="v19a forest bottom">
+  </div>
+  <div class="closeup-row">
+    <div class="label"><span class="tag">(b)</span><span class="sub">+logit-normal <em class="m">t</em></span></div>
+    <img src="assets/small_data_style_ablation/detail00_v19b.jpg" alt="v19b forest bottom">
+  </div>
+  <div class="closeup-row">
+    <div class="label"><span class="tag">(c)</span><span class="sub">+cond. dropout</span></div>
+    <img src="assets/small_data_style_ablation/detail00_v19c.jpg" alt="v19c forest bottom">
+  </div>
+  <div class="closeup-row">
+    <div class="label"><span class="tag">(d)</span><span class="sub">+full official</span></div>
+    <img src="assets/small_data_style_ablation/detail00_v19.jpg" alt="v19 forest bottom with vertical striations">
+  </div>
+  <p class="caption">
+    <strong>图 7.</strong>&nbsp; Sample 00 画面下半 (左粗树干 + 中间地面 + 右下苔藓 +
+    右侧上层树叶) 五向对比。
+    <strong>v18：</strong>painterly chunky 厚笔触树干 + 暖色秋叶碎片 + 多层 silhouette
+    清晰可分；
+    <strong>(a)：</strong><span style="color: #c53030; font-weight: 600;">god-rays 与 mist 大幅放大主导画面</span>，
+    painterly chunky 厚笔触被 atmospheric haze 稀释成更软的笔触；树干与
+    地面 silhouette 基本保留，主要问题是风格 softening 与雾化过度；
+    <strong>(b)：</strong>painterly 厚笔触与树形保留较好，但
+    <span style="color: #c53030; font-weight: 600;">左下暗部 + 右下暗部仍有未完全恢复的轻度竖向条纹</span>
+    (强度远低于 (d))；高光 god-rays 中段也出现轻度结构化痕迹；
+    <strong>(c)：</strong>五行中重建质量最接近 v18 — painterly chunky 树干 + 完整地面
+    碎叶都保留，god-rays 强度略偏 (a) 但 painterly 信息完整，无格纹或条纹伪影；
+    <strong>(d)：</strong><span style="color: #c53030; font-weight: 600;">左侧粗树干表面 + 中景树干 + 右下苔藓暗部出现明显竖向 striation 格纹</span>，
+    暗部 banding 最严重，painterly 信息几乎完全缺失。
+  </p>
+</div>
+
+<h4>5.2.2 Sample 02 湖岸：树 silhouette 与水面倒影竖纹</h4>
+<p>
+  Sample 02 (deep mountain lake at dawn) 的两侧针叶林 silhouette 与中央镜面倒影
+  是考察树形 painterly 是否退化、倒影是否出现竖纹的核心区域。运行 (d) 在两侧
+  树林区 + 水面倒影区均呈现 screen-door 竖向条纹。
+</p>
+
+<div class="closeup-figure">
+  <div class="closeup-row">
+    <div class="label"><span class="tag">v18</span><span class="sub">baseline</span></div>
+    <img src="assets/small_data_style_ablation/detail02_v18.jpg" alt="v18 lakeside trees + reflection">
+  </div>
+  <div class="closeup-row">
+    <div class="label"><span class="tag">(a)</span><span class="sub">+v-loss</span></div>
+    <img src="assets/small_data_style_ablation/detail02_v19a.jpg" alt="v19a lakeside trees + reflection">
+  </div>
+  <div class="closeup-row">
+    <div class="label"><span class="tag">(b)</span><span class="sub">+logit-normal <em class="m">t</em></span></div>
+    <img src="assets/small_data_style_ablation/detail02_v19b.jpg" alt="v19b lakeside trees + reflection">
+  </div>
+  <div class="closeup-row">
+    <div class="label"><span class="tag">(c)</span><span class="sub">+cond. dropout</span></div>
+    <img src="assets/small_data_style_ablation/detail02_v19c.jpg" alt="v19c lakeside trees + reflection">
+  </div>
+  <div class="closeup-row">
+    <div class="label"><span class="tag">(d)</span><span class="sub">+full official</span></div>
+    <img src="assets/small_data_style_ablation/detail02_v19.jpg" alt="v19 lakeside trees + reflection with vertical striations">
+  </div>
+  <p class="caption">
+    <strong>图 8.</strong>&nbsp; Sample 02 中段 (左右两侧 painted tree silhouette + 中央
+    水面倒影 + 远雾) 五向对比。
+    <strong>v18：</strong>painterly chunky 树形 + 厚笔触倒影 + 远山三层 silhouette
+    清晰可分；
+    <strong>(a)：</strong>整图 photoreal 化，painterly 笔触退化为 stock-photo 树形，
+    倒影保留 photoreal 镜面但失去厚笔触；
+    <strong>(b)：</strong>painted 风格部分保留，但远雾 + 倒影出现微弱竖向条纹；
+    <strong>(c)：</strong>painted 风格保留较好，树形+倒影皆有 painterly 触感，未观察
+    到明显伪影；
+    <strong>(d)：</strong><span style="color: #c53030; font-weight: 600;">左侧山体 + 右侧针叶林 silhouette + 整个倒影区出现 screen-door 竖向 striation 格纹</span>，
+    覆盖范围广。
+  </p>
+</div>
+
+<h4>5.2.3 Sample 07 蒲公英主体：grass 区竖向条纹 + bokeh 退化</h4>
+<p>
+  Sample 07 (backlit dandelion field) 主体为前景蒲公英 + 草丛 + 背光，是考察
+  painterly 笔触是否被替换为 photographic bokeh、草丛暗区是否出现条纹的核心
+  区域。
+</p>
+
+<div class="closeup-figure">
+  <div class="closeup-row">
+    <div class="label"><span class="tag">v18</span><span class="sub">baseline</span></div>
+    <img src="assets/small_data_style_ablation/detail07_v18.jpg" alt="v18 dandelion main subject">
+  </div>
+  <div class="closeup-row">
+    <div class="label"><span class="tag">(a)</span><span class="sub">+v-loss</span></div>
+    <img src="assets/small_data_style_ablation/detail07_v19a.jpg" alt="v19a dandelion main subject">
+  </div>
+  <div class="closeup-row">
+    <div class="label"><span class="tag">(b)</span><span class="sub">+logit-normal <em class="m">t</em></span></div>
+    <img src="assets/small_data_style_ablation/detail07_v19b.jpg" alt="v19b dandelion main subject">
+  </div>
+  <div class="closeup-row">
+    <div class="label"><span class="tag">(c)</span><span class="sub">+cond. dropout</span></div>
+    <img src="assets/small_data_style_ablation/detail07_v19c.jpg" alt="v19c dandelion main subject">
+  </div>
+  <div class="closeup-row">
+    <div class="label"><span class="tag">(d)</span><span class="sub">+full official</span></div>
+    <img src="assets/small_data_style_ablation/detail07_v19.jpg" alt="v19 dandelion main subject with cross-hatch grid">
+  </div>
+  <p class="caption">
+    <strong>图 9.</strong>&nbsp; Sample 07 主体区 (前景蒲公英 + 草丛暗部 + 暖背光) 五向
+    对比。
+    <strong>v18：</strong>painterly chunky 笔触草叶 + painted 蒲公英 + 远景树线
+    可见；
+    <strong>(a)：</strong><span style="color: #c53030; font-weight: 600;">painterly 完全退化为 photographic bokeh</span>，
+    前景蒲公英变疏散小，背景暗化呈相机散景；
+    <strong>(b)：</strong>painterly 较为完整 — chunky 草叶 + painted 蒲公英都还在，
+    主要变化是视野相对收紧 (前景密度减少)；草丛暗部存在轻度的竖向 streak，密度
+    低于 (d)；
+    <strong>(c)：</strong>painterly fingerprint 接近 v18 — 蒲公英密度高、chunky
+    草叶 + 浮散种子全保留，无观察到格纹伪影；
+    <strong>(d)：</strong><span style="color: #c53030; font-weight: 600;">草丛暗部出现密集 cross-hatch 格纹</span>
+    (竖向 striation 为主，叠加微横向 banding)，painterly 信息几乎完全缺失，整图
+    带 halftone 质感。
+  </p>
+</div>
+
+<h3>5.3 Prompt 前缀格式作为混淆变量</h3>
+
+<p>
+  我们在受控分析中发现，若 inference prompt 的 artist anchor 位置与训练 caption
+  不一致，会引入与 lever 无关但视觉量级相当的差异。因此对 Baseline 与运行 (c) 额外
+  做两组 prompt 集对比，结果见图 10。该结果说明把 prompt 写法与训练分布对齐是
+  正确归因 lever 效果的必要前置条件，并解释了我们对 README 默认配置中保留
+  显式 <code>style.trigger</code> 与忽略 think sidecar 的选择。
+</p>
+
+<div class="figure sliced narrow">
+  <div class="slice"><img src="assets/small_data_style_ablation/baseline_prompt_sets_contactsheet_slice1.jpg" alt="baseline prompt-set contact sheet (1/4)"></div>
+  <div class="slice"><img src="assets/small_data_style_ablation/baseline_prompt_sets_contactsheet_slice2.jpg" alt="baseline prompt-set contact sheet (2/4)"></div>
+  <div class="slice"><img src="assets/small_data_style_ablation/baseline_prompt_sets_contactsheet_slice3.jpg" alt="baseline prompt-set contact sheet (3/4)"></div>
+  <div class="slice"><img src="assets/small_data_style_ablation/baseline_prompt_sets_contactsheet_slice4.jpg" alt="baseline prompt-set contact sheet (4/4)">
+    <p class="caption">
+      <strong>图 10.</strong>&nbsp; Baseline 在两组 prompt 集下的采样 (上→下四页连读)。
+      左：与训练同分布的短前缀 (含显式 style trigger)；右：分布外的长 prompt。
+      完整采样在分布内稳定；这表明 Baseline 的强 fingerprint 不依赖额外 prefix 文本。
+    </p>
+  </div>
+</div>
+
+<h2>6. 讨论</h2>
+
+<h3>6.1 Velocity 损失的隐式重加权</h3>
+<p>
+  由式 (2)，<em class="m-cal">L</em><sub class="m">v</sub> =
+  𝔼 [‖<em class="m">x</em><sub class="m">θ</sub> − <em class="m">x</em><sub>0</sub>‖<sup>2</sup>
+  · (1 − <em class="m">t</em>)<sup>−2</sup>]，velocity 损失等价于在 x<sub>0</sub>-MSE
+  上施加一个 (1 − <em class="m">t</em>)<sup>−2</sup> 的权重函数。在 uniform
+  <em class="m">t</em> 下，该权重在 <em class="m">t</em> ∈ [0.9, 1.0] 区间承担约 64%
+  的总积分质量。意即在 velocity 训练中，模型有大半的梯度信号被分配到 "接近 clean
+  图但仍残留少量噪声" 的窗口。对于风格 LoRA 而言，颜色调性、构图、笔触特征均在
+  <em class="m">t</em> ∈ [0.3, 0.7] 这一中频窗口形成；velocity 损失显著削减了该窗口的
+  有效更新量，因而出现了 §5.1 (ii) 报告的 photoreal 夜景偏移。
+</p>
+
+<h3>6.2 Logit-normal 与小数据匹配的张力</h3>
+<p>
+  logit-normal (<em class="m">μ</em> = −0.8, <em class="m">σ</em> = 0.8) 将
+  𝔼[<em class="m">t</em>] 从 0.5 移到 0.34，即把更多概率质量推向 noisy 端。该选择在
+  大规模数据下使得各 <em class="m">t</em> 段都获得足够样本数；但在 56 张图、6000
+  步、batch=1 的小数据规模下，每个 mid-<em class="m">t</em> bin 实际获得的有效样
+  本数本就稀疏，进一步的密度偏移导致 palette 与 mid-frequency texture 统计学习
+  不足，对应 §5.1 (iii) 报告的整体偏冷。
+</p>
+
+<h3>6.3 Condition dropout 的正面作用</h3>
+<p>
+  与上述两项不同，condition dropout 在小数据风格 LoRA 上未观察到风格损伤。其作
+  用机制是把 unconditional branch 与 conditional branch 的相对几何在训练期同时
+  暴露给模型，从而使 inference 时 CFG 的 uncond + <em class="m">s</em> · (cond − uncond)
+  推算成立。在 <em class="m">s</em> = 4.0 这一相对较强的 CFG 下，没有 dropout 训练
+  的 LoRA 经常把输出推到 LoRA 未覆盖的方向，导致结构 artefact。运行 (c) 与 Baseline
+  的视觉对比显示，前者在风格指纹保持不变的前提下，前景结构 (puffball 形状、
+  树干轮廓) 更清晰、稳定。
+</p>
+
+<h3>6.4 Prompt 前缀格式的去混淆作用</h3>
+<p>
+  §5.3 显示 prompt 中 artist anchor 的位置 (句首 vs. 句末 tag vs. 完全缺失) 与训练
+  caption 分布对齐与否直接决定 LoRA delta 是否被正确激活。这一变量与目标 lever
+  正交，但视觉量级与 lever 效果相当；任何不控制该变量的 lever 评估都会被
+  prompt-format mismatch 污染。本文 §5.1、§5.2 与 §5.3 结论均在 v2 anchored prompt
+  下复测确认。
+</p>
+
+<h2>7. 结论与发布决策</h2>
+<p>
+  在 SenseNova-U1-8B-MoT × 56 张 Hayateluc 风格 LoRA 微调上：
+  (1) velocity 损失系统性向高 <em class="m">t</em> 端搬移梯度密度，导致天空与大面积
+      渐变区域出现规则横向条纹 banding 与 painterly→photoreal 退化；
+  (2) logit-normal 时间步在小数据下加剧 mid-<em class="m">t</em> 样本稀疏，引发 palette
+      偏冷与大面积平滑色块的 speckle 噪点；
+  (3) (1) + (2) 叠加进一步引入远景元素缺失与构图压缩等结构扭曲，劣化超出 style
+      drift 范畴；
+  (4) condition dropout 是三项中唯一无损反而有益的算法层；
+  (5) prompt 前缀格式与训练分布的匹配是评估前置条件，必须先控制。
+</p>
+<p>
+  据此，我们将 <code>configs/default.yaml</code> 保留为本地基线
+  (<code>x0 + uniform t + 0 dropout</code> + 显式 style trigger + 忽略 think
+  sidecar)，并以 <code>configs/official_alignment.yaml</code> 形式发布官方对齐组
+  合，标注其用途为研究复现。该选择不否定公开报告中的算法设计，只反映其与本仓
+  库目标 (小数据风格 LoRA) 的不匹配。
+</p>
+
+<h3>默认配置摘要</h3>
+<pre>data:
+  use_think_labels: false
+
+style:
+  trigger: "my style"
+  prompt_template: official
+
+lora:
+  preset: attn_mlp_no_head
+
+unfreeze:
+  - '^fm_modules\.timestep_embedder\.'
+  - '^fm_modules\.noise_scale_embedder\.'
+  - '^fm_modules\.vision_model_mot_gen\.'
+  - '^fm_modules\.fm_head\.'
+
+train:
+  loss_type: x0
+  t_dist: uniform
+  cond_dropout_text: 0.0
+  cond_dropout_both: 0.0
+</pre>
+
+<h2>参考文献</h2>
+<ol class="refs">
+  <li>SenseNova-U1 Technical Report. <em>OpenSenseNova</em>, 2026.
+      <span class="small">https://github.com/OpenSenseNova/SenseNova-U1</span></li>
+  <li>Lipman, Y. et al. Flow Matching for Generative Modeling. <em>ICLR</em>, 2023.</li>
+  <li>Esser, P. et al. Scaling Rectified Flow Transformers for High-Resolution
+      Image Synthesis. <em>ICML</em>, 2024 — 提出 logit-normal <em class="m">t</em> 采样.</li>
+  <li>Ho, J. &amp; Salimans, T. Classifier-Free Diffusion Guidance.
+      <em>NeurIPS Workshop on Deep Generative Models</em>, 2021.</li>
+  <li>Hu, E. J. et al. LoRA: Low-Rank Adaptation of Large Language Models.
+      <em>ICLR</em>, 2022.</li>
+</ol>
+
+</section>
+
+</body>
+</html>
